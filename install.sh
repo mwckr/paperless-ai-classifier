@@ -38,6 +38,9 @@ OLLAMA_URL=${OLLAMA_URL:-http://localhost:11434}
 read -p "Ollama Model [ministral-3:14b]: " OLLAMA_MODEL
 OLLAMA_MODEL=${OLLAMA_MODEL:-ministral-3:14b}
 
+read -p "Ollama Threads [10]: " OLLAMA_THREADS
+OLLAMA_THREADS=${OLLAMA_THREADS:-10}
+
 read -p "Max pages to process [3]: " MAX_PAGES
 MAX_PAGES=${MAX_PAGES:-3}
 
@@ -64,15 +67,17 @@ pip3 install fastapi uvicorn python-dotenv pydantic requests pillow --break-syst
 echo "[3/6] Creating installation directory..."
 mkdir -p "$INSTALL_DIR"
 
-echo "[4/6] Copying application files..."
+echo "[4/6] Copying and configuring application files..."
 cp "$SCRIPT_DIR/ministral.py" "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/classifier_api.py" "$INSTALL_DIR/"
 
 # Update paths in classifier_api.py
-sed -i "s|/root/|$INSTALL_DIR/|g" "$INSTALL_DIR/classifier_api.py"
-sed -i 's|ENV_FILE = Path("/root/.env")|ENV_FILE = Path("'$INSTALL_DIR'/.env")|g' "$INSTALL_DIR/classifier_api.py"
-sed -i 's|DB_PATH = Path("/root/|DB_PATH = Path("'$INSTALL_DIR'/|g' "$INSTALL_DIR/classifier_api.py"
+sed -i 's|ENV_FILE = Path("/root/.env")|ENV_FILE = Path("'"$INSTALL_DIR"'/.env")|g' "$INSTALL_DIR/classifier_api.py"
+sed -i 's|DB_PATH = Path("/root/classifier_audit.db")|DB_PATH = Path("'"$INSTALL_DIR"'/classifier_audit.db")|g' "$INSTALL_DIR/classifier_api.py"
 sed -i "s|sys.path.insert(0, '/root')|sys.path.insert(0, '$INSTALL_DIR')|g" "$INSTALL_DIR/classifier_api.py"
+
+# Update log file path in ministral.py
+sed -i "s|FileHandler('ministral_vision.log')|FileHandler('$INSTALL_DIR/ministral_vision.log')|g" "$INSTALL_DIR/ministral.py"
 
 echo "[5/6] Creating configuration..."
 cat > "$INSTALL_DIR/.env" << ENVEOF
@@ -83,7 +88,7 @@ PAPERLESS_TOKEN=$PAPERLESS_TOKEN
 # Ollama Configuration
 OLLAMA_URL=$OLLAMA_URL
 OLLAMA_MODEL=$OLLAMA_MODEL
-OLLAMA_THREADS=10
+OLLAMA_THREADS=$OLLAMA_THREADS
 
 # Processing Options
 MAX_PAGES=$MAX_PAGES
@@ -134,8 +139,7 @@ echo "Logs:      journalctl -u paperless-classifier -f"
 echo ""
 
 if curl -s "http://localhost:$API_PORT/api/health" > /dev/null 2>&1; then
-    echo "Service is running"
+    echo "[OK] Service is running"
 else
-    echo "Service may still be starting - check logs"
+    echo "[..] Service may still be starting - check: journalctl -u paperless-classifier -f"
 fi
-INSTALLER_EOF

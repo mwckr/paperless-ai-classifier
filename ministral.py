@@ -8,6 +8,7 @@ Document classification using Ministral 3's dedicated vision encoder
 - Monitors latency and token usage
 - Integrates Paperless image fetching
 """
+import os
 import requests
 import json
 import base64
@@ -19,6 +20,26 @@ import tempfile
 import subprocess
 from typing import Optional, Tuple, Dict, List
 from datetime import datetime
+from pathlib import Path
+
+# Load environment variables from .env file if it exists
+def load_env():
+    env_paths = [
+        Path(__file__).parent / ".env",
+        Path("/opt/paperless-classifier/.env"),
+        Path.home() / ".env"
+    ]
+    for env_path in env_paths:
+        if env_path.exists():
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        key, value = line.split('=', 1)
+                        os.environ.setdefault(key.strip(), value.strip())
+            break
+
+load_env()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,12 +51,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration
-PAPERLESS_URL = "http://192.168.1.201:8000"
-PAPERLESS_TOKEN = "ceb3ef3a18218fa5df247416978aa58b7be63d18"
-OLLAMA_URL = "http://localhost:11434"
-OLLAMA_MODEL = "ministral-3:14b"  # Optimized for vision
-NUM_THREADS = 10
+# Configuration from environment variables
+PAPERLESS_URL = os.getenv("PAPERLESS_URL", "http://localhost:8000")
+PAPERLESS_TOKEN = os.getenv("PAPERLESS_TOKEN", "")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "ministral-3:14b")
+NUM_THREADS = int(os.getenv("OLLAMA_THREADS", "10"))
 
 # ============================================================================
 # FULL DOCUMENT TYPES FROM v5 (200+ types, 15+ categories)
