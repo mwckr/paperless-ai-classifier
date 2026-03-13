@@ -857,29 +857,19 @@ configure_paperless() {
     break
   done
   
-  # Test connection - try both with and without trailing slash
+  # Test connection - use /api/documents/ which returns 200 directly (no redirects)
   echo ""
   msg_info "Testing connection to Paperless..."
   
   local response
   
-  # Try with trailing slash first (standard)
-  response=$(timeout 15 curl -sL -o /dev/null -w "%{http_code}" \
+  # Test against /api/documents/ - returns 200 on success, 401/403 on auth failure
+  response=$(timeout 15 curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: Token $PAPERLESS_TOKEN" \
-    "$PAPERLESS_URL/api/" \
+    "$PAPERLESS_URL/api/documents/" \
     --connect-timeout 10 2>/dev/null) || response="000"
   
-  log "Paperless test /api/: HTTP $response"
-  
-  # If redirect or error, try without trailing slash
-  if [[ "$response" == "302" || "$response" == "301" || "$response" == "404" ]]; then
-    log "Trying without trailing slash..."
-    response=$(timeout 15 curl -sL -o /dev/null -w "%{http_code}" \
-      -H "Authorization: Token $PAPERLESS_TOKEN" \
-      "$PAPERLESS_URL/api" \
-      --connect-timeout 10 2>/dev/null) || response="000"
-    log "Paperless test /api: HTTP $response"
-  fi
+  log "Paperless test /api/documents/: HTTP $response"
   
   case "$response" in
     200)
@@ -891,9 +881,9 @@ configure_paperless() {
       die "Authentication failed"
       ;;
     302|301)
-      # Still getting redirect means likely auth issue
-      msg_warn "Paperless keeps redirecting (HTTP $response)"
-      echo -e "${YW}This often means the token is invalid. Please verify it.${CL}"
+      # Redirect to login means token not accepted
+      msg_warn "Paperless is redirecting to login (HTTP $response)"
+      echo -e "${YW}This usually means the token is invalid.${CL}"
       read -rp "Continue anyway? [y/N]: " confirm
       if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         SCRIPT_SUCCESS=true
