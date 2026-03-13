@@ -809,8 +809,8 @@ configure_paperless() {
   echo ""
   echo -e "To get your API token:"
   echo -e "  1. Open Paperless-ngx in your browser"
-  echo -e "  2. Go to ${GN}Settings → Administration → Auth Tokens${CL}"
-  echo -e "  3. Create a new token or copy an existing one"
+  echo -e "  2. Click your ${GN}profile icon${CL} (upper right corner)"
+  echo -e "  3. Copy your existing token or generate a new one"
   echo ""
   
   # Get URL with validation
@@ -857,17 +857,29 @@ configure_paperless() {
     break
   done
   
-  # Test connection
+  # Test connection - try both with and without trailing slash
   echo ""
   msg_info "Testing connection to Paperless..."
   
   local response
-  response=$(timeout 15 curl -s -o /dev/null -w "%{http_code}" \
+  
+  # Try with trailing slash first (standard)
+  response=$(timeout 15 curl -sL -o /dev/null -w "%{http_code}" \
     -H "Authorization: Token $PAPERLESS_TOKEN" \
     "$PAPERLESS_URL/api/" \
     --connect-timeout 10 2>/dev/null) || response="000"
   
-  log "Paperless connection test: HTTP $response"
+  log "Paperless test /api/: HTTP $response"
+  
+  # If redirect or error, try without trailing slash
+  if [[ "$response" == "302" || "$response" == "301" || "$response" == "404" ]]; then
+    log "Trying without trailing slash..."
+    response=$(timeout 15 curl -sL -o /dev/null -w "%{http_code}" \
+      -H "Authorization: Token $PAPERLESS_TOKEN" \
+      "$PAPERLESS_URL/api" \
+      --connect-timeout 10 2>/dev/null) || response="000"
+    log "Paperless test /api: HTTP $response"
+  fi
   
   case "$response" in
     200)
@@ -877,6 +889,16 @@ configure_paperless() {
       msg_error "Invalid API token (HTTP $response)"
       echo -e "${YW}Please verify your token and try again.${CL}"
       die "Authentication failed"
+      ;;
+    302|301)
+      # Still getting redirect means likely auth issue
+      msg_warn "Paperless keeps redirecting (HTTP $response)"
+      echo -e "${YW}This often means the token is invalid. Please verify it.${CL}"
+      read -rp "Continue anyway? [y/N]: " confirm
+      if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        SCRIPT_SUCCESS=true
+        exit 0
+      fi
       ;;
     000)
       msg_warn "Could not connect to Paperless (timeout or network error)"
