@@ -325,7 +325,11 @@ get_valid_container_id() {
     suggested="$start_id"
   fi
   
+  # Use the higher of suggested or start_id (important for second container)
   local ctid="$suggested"
+  if [[ "$start_id" -gt "$ctid" ]]; then
+    ctid="$start_id"
+  fi
   
   while ! validate_container_id "$ctid"; do
     ctid=$((ctid + 1))
@@ -682,10 +686,11 @@ check_resources() {
   echo ""
   
   if [[ $ram_percent -ge $RAM_CRIT_PERCENT ]]; then
-    msg_error "RAM usage would exceed ${RAM_CRIT_PERCENT}% - system instability likely"
-    ((errors++))
+    msg_warn "RAM allocation is ${ram_percent}% of host RAM (overcommit)"
+    echo -e "${TAB}${YW}Note: LXC uses memory dynamically - allocated ≠ actually used${CL}"
+    ((warnings++))
   elif [[ $ram_percent -ge $RAM_WARN_PERCENT ]]; then
-    msg_warn "RAM usage at ${ram_percent}% - system may be slow under load"
+    msg_warn "RAM allocation at ${ram_percent}% - may be tight under heavy load"
     ((warnings++))
   else
     msg_ok "RAM allocation OK (${ram_percent}% of total)"
