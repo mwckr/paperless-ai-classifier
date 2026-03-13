@@ -1497,6 +1497,91 @@ Proceed with installation?"
 }
 
 # =============================================================================
+# SET CONTAINER NOTES
+# =============================================================================
+
+set_container_notes() {
+  log "Setting container notes"
+  
+  # Ollama notes
+  local ollama_notes="# Ollama LXC
+
+**Paperless AI Classifier - Vision Model Server**
+
+## Connection Info
+- **IP Address:** ${OLLAMA_IP}
+- **API Endpoint:** http://${OLLAMA_IP}:11434
+- **Model:** ${var_model}
+
+## Quick Commands
+\`\`\`
+# Enter container
+pct enter ${OLLAMA_CTID}
+
+# Check Ollama status
+pct exec ${OLLAMA_CTID} -- systemctl status ollama
+
+# Pull a different model
+pct exec ${OLLAMA_CTID} -- ollama pull <model-name>
+
+# List models
+pct exec ${OLLAMA_CTID} -- ollama list
+
+# Set root password
+pct exec ${OLLAMA_CTID} -- passwd
+\`\`\`
+
+## Related
+- API Container: CT ${API_CTID}
+- GitHub: https://github.com/mwckr/paperless-ai-classifier"
+
+  # API notes
+  local api_notes="# Paperless AI Classifier
+
+**Document Classification API**
+
+## Connection Info
+- **IP Address:** ${API_IP}
+- **Dashboard:** http://${API_IP}:8001/dashboard
+- **Health Check:** http://${API_IP}:8001/api/health
+- **Paperless:** ${PAPERLESS_URL}
+
+## Quick Commands
+\`\`\`
+# Enter container
+pct enter ${API_CTID}
+
+# View live logs
+pct exec ${API_CTID} -- journalctl -u paperless-classifier -f
+
+# Restart service
+pct exec ${API_CTID} -- systemctl restart paperless-classifier
+
+# Edit configuration
+pct exec ${API_CTID} -- nano /opt/paperless-classifier/.env
+
+# Set root password
+pct exec ${API_CTID} -- passwd
+\`\`\`
+
+## Configuration
+Config file: \`/opt/paperless-classifier/.env\`
+
+## Related
+- Ollama Container: CT ${OLLAMA_CTID} (${OLLAMA_IP}:11434)
+- GitHub: https://github.com/mwckr/paperless-ai-classifier"
+
+  # Apply notes (escape special chars for pct)
+  pct set "$OLLAMA_CTID" --description "$ollama_notes" 2>/dev/null || \
+    log "WARN: Could not set Ollama notes"
+  
+  pct set "$API_CTID" --description "$api_notes" 2>/dev/null || \
+    log "WARN: Could not set API notes"
+  
+  msg_ok "Container notes configured"
+}
+
+# =============================================================================
 # COMPLETION
 # =============================================================================
 
@@ -1530,10 +1615,15 @@ show_completion() {
   echo -e "${TAB}3. Watch it get automatically classified!"
   echo ""
   echo -e "${YW}Useful Commands:${CL}"
+  echo -e "${TAB}Enter Ollama:  ${GN}pct enter $OLLAMA_CTID${CL}"
+  echo -e "${TAB}Enter API:     ${GN}pct enter $API_CTID${CL}"
   echo -e "${TAB}View logs:     pct exec $API_CTID -- journalctl -u paperless-classifier -f"
   echo -e "${TAB}Edit config:   pct exec $API_CTID -- nano /opt/paperless-classifier/.env"
   echo -e "${TAB}Restart API:   pct exec $API_CTID -- systemctl restart paperless-classifier"
-  echo -e "${TAB}Ollama shell:  pct enter $OLLAMA_CTID"
+  echo ""
+  echo -e "${YW}Set root password (optional):${CL}"
+  echo -e "${TAB}pct exec $OLLAMA_CTID -- passwd"
+  echo -e "${TAB}pct exec $API_CTID -- passwd"
   echo ""
   echo -e "${DGN}Log file: $LOG_FILE${CL}"
   echo ""
@@ -1623,6 +1713,9 @@ main() {
   # Create and setup API
   create_lxc "$API_CTID" "$var_api_hostname" "$var_api_cpu" "$var_api_ram" "$var_api_disk" "API"
   setup_api
+  
+  # Set container notes in Proxmox
+  set_container_notes
   
   # Done!
   show_completion
