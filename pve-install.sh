@@ -1263,7 +1263,7 @@ setup_ollama() {
     
     # Update and install dependencies
     apt-get update -qq
-    apt-get install -y -qq curl ca-certificates >/dev/null 2>&1
+    apt-get install -y -qq curl ca-certificates zstd >/dev/null 2>&1
     
     # Install Ollama
     curl -fsSL https://ollama.ai/install.sh | sh
