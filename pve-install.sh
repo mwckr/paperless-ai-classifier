@@ -451,9 +451,12 @@ get_storage_info() {
   local storage="$1"
   local info
   
+  # pvesm status columns: Name Type Status Total Used Available %
+  # Values are in KB, so divide by 1024/1024 to get GB
+  # $4=Total, $5=Used, $6=Available
   info=$(pvesm status -storage "$storage" 2>/dev/null | awk 'NR>1 {
     total_gb = int($4/1024/1024)
-    avail_gb = int($5/1024/1024)
+    avail_gb = int($6/1024/1024)
     printf "%d %d", total_gb, avail_gb
   }')
   
