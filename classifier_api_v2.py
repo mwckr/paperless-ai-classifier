@@ -991,6 +991,7 @@ DASHBOARD_HTML = '''
                 <p style="color: #888; margin-bottom: 15px;">These mappings are automatically applied to normalize AI suggestions.</p>
                 <div class="actions">
                     <button onclick="showAddMappingModal()">Add Mapping</button>
+                    <button onclick="resetLearning()" class="danger">Reset All Learning</button>
                 </div>
                 <div style="overflow-x: auto;">
                     <table>
@@ -1005,6 +1006,28 @@ DASHBOARD_HTML = '''
                             </tr>
                         </thead>
                         <tbody id="mappings-list"></tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>Classification Examples (Few-Shot Learning)</h3>
+                <p style="color: #888; margin-bottom: 15px;">Verified examples are shown to the AI as guidance for future classifications.</p>
+                <div class="actions">
+                    <button onclick="clearExamples()" class="warn">Clear Examples</button>
+                </div>
+                <div style="overflow-x: auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Document</th>
+                                <th>Type</th>
+                                <th>Correspondent</th>
+                                <th>Tags</th>
+                                <th>Verified</th>
+                            </tr>
+                        </thead>
+                        <tbody id="examples-list"></tbody>
                     </table>
                 </div>
             </div>
@@ -1422,7 +1445,51 @@ DASHBOARD_HTML = '''
                 } else {
                     tbody.innerHTML = '<tr><td colspan="6" style="color: #888;">No mappings yet. Correct classifications to start learning!</td></tr>';
                 }
+                
+                // Also refresh examples
+                await refreshExamplesList();
             } catch (e) { console.error(e); }
+        }
+        
+        async function refreshExamplesList() {
+            try {
+                const data = await fetchJson('/api/learn/examples');
+                const tbody = document.getElementById('examples-list');
+                
+                if (data.examples && data.examples.length > 0) {
+                    tbody.innerHTML = data.examples.map(ex => {
+                        const tags = (ex.tags || []).slice(0, 4).map(t => `<span class="tag">${t}</span>`).join(' ');
+                        const verified = ex.user_verified ? '✓' : '-';
+                        return `<tr>
+                            <td><strong>#${ex.document_id}</strong><br><small>${(ex.document_title || '').substring(0, 30)}</small></td>
+                            <td>${ex.document_type || '-'}</td>
+                            <td>${ex.correspondent || '-'}</td>
+                            <td>${tags || '-'}</td>
+                            <td style="color: ${ex.user_verified ? '#00ff88' : '#888'}">${verified}</td>
+                        </tr>`;
+                    }).join('');
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="5" style="color: #888;">No examples yet.</td></tr>';
+                }
+            } catch (e) { console.error(e); }
+        }
+        
+        async function resetLearning() {
+            if (confirm('⚠️ Reset ALL learning data?\\n\\nThis will delete:\\n• All term mappings\\n• All classification examples\\n\\nThe AI will start fresh with no learned patterns.')) {
+                const resp = await fetch('/api/learn/reset', { method: 'DELETE' });
+                const data = await resp.json();
+                alert(`Learning reset!\\n• ${data.examples_deleted} examples deleted\\n• ${data.mappings_deleted} mappings deleted`);
+                refreshMappings();
+            }
+        }
+        
+        async function clearExamples() {
+            if (confirm('Clear all classification examples?\\n\\nMappings will be kept.')) {
+                const resp = await fetch('/api/learn/examples', { method: 'DELETE' });
+                const data = await resp.json();
+                alert(`Cleared ${data.deleted} examples`);
+                refreshMappings();
+            }
         }
         
         async function refreshConfig() {
@@ -1738,6 +1805,70 @@ async def delete_mapping(mapping_id: int):
     conn.commit()
     conn.close()
     return {"status": "deleted" if deleted else "not_found"}
+
+
+@app.delete("/api/learn/examples")
+async def clear_all_examples():
+    """Clear all classification examples (fresh start for learning)"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM classification_examples")
+    deleted = c.rowcount
+    conn.commit()
+    conn.close()
+    logger.info(f"Cleared {deleted} classification examples")
+    return {"status": "cleared", "deleted": deleted}
+
+
+@app.delete("/api/learn/mappings")
+async def clear_all_mappings():
+    """Clear all term mappings (fresh start for learning)"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM term_mappings")
+    deleted = c.rowcount
+    conn.commit()
+    conn.close()
+    logger.info(f"Cleared {deleted} term mappings")
+    return {"status": "cleared", "deleted": deleted}
+
+
+@app.delete("/api/learn/reset")
+async def reset_all_learning():
+    """Reset ALL learning data (examples + mappings)"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM classification_examples")
+    examples_deleted = c.rowcount
+    c.execute("DELETE FROM term_mappings")
+    mappings_deleted = c.rowcount
+    conn.commit()
+    conn.close()
+    logger.info(f"Reset learning: {examples_deleted} examples, {mappings_deleted} mappings cleared")
+    return {
+        "status": "reset", 
+        "examples_deleted": examples_deleted,
+        "mappings_deleted": mappings_deleted
+    }
+
+
+@app.get("/api/learn/examples")
+async def list_examples():
+    """List all classification examples"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM classification_examples ORDER BY created_at DESC")
+    rows = [dict(row) for row in c.fetchall()]
+    for row in rows:
+        if row.get('tags'):
+            try:
+                row['tags'] = json.loads(row['tags'])
+            except:
+                pass
+    conn.close()
+    return {"examples": rows}
+
 
 @app.post("/api/learn/correct")
 async def learn_from_correction(request: Request):

@@ -255,54 +255,40 @@ def analyze_with_vision(image_bytes: bytes, content_type: str) -> Tuple[bool, Op
     existing_tags = get_existing_tags()
     existing_tags_str = ", ".join(existing_tags[:50]) if existing_tags else "keine vorhanden"
     
-    # Build prompt - German output for Paperless fields
-    prompt = f"""Analysiere dieses Dokument sorgfältig.
+    # Build prompt - document-type agnostic, with learning injection
+    prompt = f"""Analysiere dieses Dokument für die Archivierung in Paperless-ngx.
 
 {few_shot}
 Bestimme:
-1. Dokumenttyp (z.B. "Rechnung", "Vertrag", "Bescheid", "Kontoauszug", etc.)
-2. Absender/Firma (Name wie er auf dem Dokument erscheint)
-3. 5 relevante Tags zur Organisation (siehe TAG-REGELN unten)
-4. Kurze Zusammenfassung (1 Satz)
 
-WICHTIG: 
-- dokumenttyp und tags MÜSSEN auf Deutsch sein
-- Wenn die Überschrift den Typ nennt (z.B. "Rechnung", "Receipt"), diesen DIREKT übernehmen
+1. DOKUMENTTYP: Was für ein Dokument ist das? 
+   (z.B. Rechnung, Vertrag, Bescheid, Kostenvoranschlag, Steuererklärung, Gutschein, Arztbrief, etc.)
 
-TAG-REGELN - 5 spezifische, inhaltsbezogene Tags:
+2. ABSENDER: Wer hat dieses Dokument erstellt oder gesendet?
+   (Firma, Behörde, Person - wie auf dem Dokument angegeben)
 
-VERBOTEN in Tags:
-- NIEMALS den Dokumenttyp wiederholen (kein "rechnung", "beleg", "vertrag" als Tag wenn das der Typ ist)
-- NIEMALS den Absender/Firma wiederholen (kein "anthropic" als Tag wenn das der Correspondent ist)
-- NIEMALS generische Wörter: "dienstleistung", "dokument", "beleg", "zahlung", "kosten"
+3. TAGS: Beschreibe den INHALT mit 5 spezifischen Begriffen.
+   
+   Frage dich: "Was sind die wichtigsten Themen, Gegenstände oder Informationen in diesem Dokument?"
+   
+   Beispiele je nach Dokumenttyp:
+   - Produktkauf: Produktname, Produktkategorie, Verwendungszweck
+   - Vertrag: Vertragsgegenstand, Laufzeit, Bereich
+   - Steuerbescheid: Steuerart, Jahr, Ergebnis
+   - Arztbrief: Fachbereich, Behandlung, Diagnose
+   - Kostenvoranschlag: Gewerk, Projekt, Umfang
 
-WAS Tags beschreiben SOLLEN:
-- Tag 1-2: KONKRETES Produkt/Artikel auf dem Dokument (z.B. "claude-pro", "macbook-air", "hausratversicherung")
-- Tag 3: Branche/Kategorie (z.B. "ki-software", "elektronik", "versicherung", "energie")
-- Tag 4: Verwendungszweck/Kontext (z.B. "arbeit", "privat", "haushalt", "büro")
-- Tag 5: Zeitraum/Frequenz falls relevant (z.B. "monatlich", "jahresabo", "einmalig", "q1-2026")
-
-BEISPIELE:
-- Claude Pro Abo-Rechnung von Anthropic:
-  Typ: "Rechnung", Correspondent: "Anthropic, PBC"
-  Tags: ["claude-pro", "ki-software", "abo-monatlich", "arbeit", "april-2026"]
-  (NICHT: "rechnung", "anthropic", "dienstleistung", "zahlung")
-
-- iPhone Rechnung von Apple:
-  Typ: "Rechnung", Correspondent: "Apple Inc."
-  Tags: ["iphone-15-pro", "smartphone", "elektronik", "privat", "einmalkauf"]
-  (NICHT: "rechnung", "apple", "beleg", "kauf")
-
-- Stromabrechnung von Vattenfall:
-  Typ: "Abrechnung", Correspondent: "Vattenfall"
-  Tags: ["strom", "energie", "haushalt", "jahresabrechnung", "2025"]
-  (NICHT: "abrechnung", "vattenfall", "kosten", "zahlung")
+WICHTIG für Tags:
+- Nenne konkrete Inhalte, nicht generische Begriffe
+- NICHT den Dokumenttyp wiederholen (kein "rechnung" wenn Typ=Rechnung)
+- NICHT den Absender wiederholen (kein "telekom" wenn Absender=Telekom)
+- NICHT: "dienstleistung", "dokument", "beleg", "zahlung", "kosten", "kunde"
 
 EXISTIERENDE TAGS (wenn passend, exakt wiederverwenden):
 {existing_tags_str}
 
-Antworte NUR mit gültigem JSON:
-{{"dokumenttyp": "Typ auf Deutsch", "absender": "Firmenname", "tags": ["produkt", "kategorie", "kontext", "zweck", "zeitraum"], "zusammenfassung": "Kurze Beschreibung", "konfidenz": 0.95}}"""
+Antworte NUR mit JSON:
+{{"dokumenttyp": "...", "absender": "...", "tags": ["inhalt1", "inhalt2", "inhalt3", "inhalt4", "inhalt5"], "zusammenfassung": "Ein Satz", "konfidenz": 0.95}}"""
 
     payload = {
         "model": OLLAMA_MODEL,
