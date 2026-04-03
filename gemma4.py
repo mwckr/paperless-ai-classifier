@@ -255,40 +255,66 @@ def analyze_with_vision(image_bytes: bytes, content_type: str) -> Tuple[bool, Op
     existing_tags = get_existing_tags()
     existing_tags_str = ", ".join(existing_tags[:50]) if existing_tags else "keine vorhanden"
     
-    # Build prompt - document-type agnostic, with learning injection
-    prompt = f"""Analysiere dieses Dokument für die Archivierung in Paperless-ngx.
+    # Build prompt - strict, focused on actual content identification
+    prompt = f"""Du bist ein Dokumentenklassifizierer für Paperless-ngx. Analysiere dieses Dokument.
 
 {few_shot}
-Bestimme:
+AUFGABE: Bestimme Dokumenttyp, Absender und 5 beschreibende Tags.
 
-1. DOKUMENTTYP: Was für ein Dokument ist das? 
-   (z.B. Rechnung, Vertrag, Bescheid, Kostenvoranschlag, Steuererklärung, Gutschein, Arztbrief, etc.)
+═══════════════════════════════════════════════════════════════════
+DOKUMENTTYP (immer kleingeschrieben):
+═══════════════════════════════════════════════════════════════════
+Wähle den passendsten:
+- rechnung (für Kaufbelege, Rechnungen)
+- vertrag (für Verträge, Vereinbarungen)
+- erstattung (für Rückzahlungen, Gutschriften, Auszahlungen)
+- fahrkarte (für Tickets, Bordkarten, Buchungsbestätigungen)
+- bescheid (für behördliche Mitteilungen)
+- kontoauszug (für Bankauszüge)
+- versicherung (für Policen, Beitragsrechnungen)
+- arztbrief (für medizinische Dokumente)
+- kostenvoranschlag (für Angebote, Schätzungen)
 
-2. ABSENDER: Wer hat dieses Dokument erstellt oder gesendet?
-   (Firma, Behörde, Person - wie auf dem Dokument angegeben)
+═══════════════════════════════════════════════════════════════════
+TAGS - DIE WICHTIGSTE AUFGABE:
+═══════════════════════════════════════════════════════════════════
+Beantworte diese Fragen für die Tags:
+1. Was ist das HAUPTPRODUKT oder die HAUPTSACHE? (z.B. "steelcase-bürostuhl", "zigbee-adapter", "ice-ticket")
+2. Welche KATEGORIE? (z.B. "büromöbel", "smarthome", "bahnreise")
+3. Welcher KONTEXT? (z.B. "arbeit", "privat", "haushalt")
+4. Welche DETAILS sind relevant? (z.B. "verspätung", "erstattung", "abo")
+5. OPTIONAL: Zeitraum oder Route (z.B. "märz-2026", "berlin-köln")
 
-3. TAGS: Beschreibe den INHALT mit 5 spezifischen Begriffen.
-   
-   Frage dich: "Was sind die wichtigsten Themen, Gegenstände oder Informationen in diesem Dokument?"
-   
-   Beispiele je nach Dokumenttyp:
-   - Produktkauf: Produktname, Produktkategorie, Verwendungszweck
-   - Vertrag: Vertragsgegenstand, Laufzeit, Bereich
-   - Steuerbescheid: Steuerart, Jahr, Ergebnis
-   - Arztbrief: Fachbereich, Behandlung, Diagnose
-   - Kostenvoranschlag: Gewerk, Projekt, Umfang
+VERBOTENE WÖRTER (NIEMALS als Tag verwenden):
+❌ dienstleistung, beleg, zahlung, kosten, kunde, kauf, produkt
+❌ rechnung, vertrag, dokument (= Dokumenttyp, nicht Tag!)
+❌ Der Firmenname des Absenders
+❌ Zufällige Wörter aus dem Dokument die nicht das Hauptthema sind
 
-WICHTIG für Tags:
-- Nenne konkrete Inhalte, nicht generische Begriffe
-- NICHT den Dokumenttyp wiederholen (kein "rechnung" wenn Typ=Rechnung)
-- NICHT den Absender wiederholen (kein "telekom" wenn Absender=Telekom)
-- NICHT: "dienstleistung", "dokument", "beleg", "zahlung", "kosten", "kunde"
+BEISPIELE:
 
-EXISTIERENDE TAGS (wenn passend, exakt wiederverwenden):
+Steelcase Bürostuhl-Rechnung von LEiK GmbH:
+→ Typ: rechnung | Tags: ["steelcase-please", "bürostuhl", "büromöbel", "arbeit", "vorkasse"]
+
+Home Assistant Adapter von BerryBase:
+→ Typ: rechnung | Tags: ["home-assistant-zbt2", "zigbee-adapter", "smarthome", "haustechnik", "kreditkarte"]
+
+DB Verspätungs-Erstattung:
+→ Typ: erstattung | Tags: ["fahrgastrechte", "verspätung", "bahnreise", "berlin-köln", "rückerstattung"]
+
+FlixTrain Bordkarte Berlin-Köln:
+→ Typ: fahrkarte | Tags: ["flixtrain", "berlin-köln", "zugticket", "fernreise", "sitzplatz"]
+
+Claude Pro Abo-Rechnung:
+→ Typ: rechnung | Tags: ["claude-pro", "ki-assistent", "software-abo", "arbeit", "monatlich"]
+
+═══════════════════════════════════════════════════════════════════
+EXISTIERENDE TAGS (exakt wiederverwenden wenn passend):
 {existing_tags_str}
+═══════════════════════════════════════════════════════════════════
 
-Antworte NUR mit JSON:
-{{"dokumenttyp": "...", "absender": "...", "tags": ["inhalt1", "inhalt2", "inhalt3", "inhalt4", "inhalt5"], "zusammenfassung": "Ein Satz", "konfidenz": 0.95}}"""
+Antworte NUR mit validem JSON:
+{{"dokumenttyp": "typ_kleingeschrieben", "absender": "Firmenname", "tags": ["hauptprodukt", "kategorie", "kontext", "detail", "optional"], "zusammenfassung": "Ein Satz", "konfidenz": 0.95}}"""
 
     payload = {
         "model": OLLAMA_MODEL,

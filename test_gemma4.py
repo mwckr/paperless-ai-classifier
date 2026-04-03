@@ -186,39 +186,65 @@ def analyze_with_gemma4(image_bytes: bytes, content_type: str) -> Optional[Dict]
     # Encode image
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     
-    # Document-agnostic prompt - works for any document type
-    prompt = """Analysiere dieses Dokument für die Archivierung in Paperless-ngx.
+    # Strict prompt focused on actual content identification
+    prompt = """Du bist ein Dokumentenklassifizierer für Paperless-ngx. Analysiere dieses Dokument.
 
-Bestimme:
+AUFGABE: Bestimme Dokumenttyp, Absender und 5 beschreibende Tags.
 
-1. DOKUMENTTYP: Was für ein Dokument ist das? 
-   (z.B. Rechnung, Vertrag, Bescheid, Kostenvoranschlag, Steuererklärung, Gutschein, Arztbrief, etc.)
+═══════════════════════════════════════════════════════════════════
+DOKUMENTTYP (immer kleingeschrieben):
+═══════════════════════════════════════════════════════════════════
+Wähle den passendsten:
+- rechnung (für Kaufbelege, Rechnungen)
+- vertrag (für Verträge, Vereinbarungen)
+- erstattung (für Rückzahlungen, Gutschriften, Auszahlungen)
+- fahrkarte (für Tickets, Bordkarten, Buchungsbestätigungen)
+- bescheid (für behördliche Mitteilungen)
+- kontoauszug (für Bankauszüge)
+- versicherung (für Policen, Beitragsrechnungen)
+- arztbrief (für medizinische Dokumente)
+- kostenvoranschlag (für Angebote, Schätzungen)
 
-2. ABSENDER: Wer hat dieses Dokument erstellt oder gesendet?
-   (Firma, Behörde, Person - wie auf dem Dokument angegeben)
+═══════════════════════════════════════════════════════════════════
+TAGS - DIE WICHTIGSTE AUFGABE:
+═══════════════════════════════════════════════════════════════════
+Beantworte diese Fragen für die Tags:
+1. Was ist das HAUPTPRODUKT oder die HAUPTSACHE? (z.B. "steelcase-bürostuhl", "zigbee-adapter", "ice-ticket")
+2. Welche KATEGORIE? (z.B. "büromöbel", "smarthome", "bahnreise")
+3. Welcher KONTEXT? (z.B. "arbeit", "privat", "haushalt")
+4. Welche DETAILS sind relevant? (z.B. "verspätung", "erstattung", "abo")
+5. OPTIONAL: Zeitraum oder Route (z.B. "märz-2026", "berlin-köln")
 
-3. TAGS: Beschreibe den INHALT mit 5 spezifischen Begriffen.
-   
-   Frage dich: "Was sind die wichtigsten Themen, Gegenstände oder Informationen in diesem Dokument?"
-   
-   Beispiele je nach Dokumenttyp:
-   - Produktkauf: Produktname, Produktkategorie, Verwendungszweck
-   - Vertrag: Vertragsgegenstand, Laufzeit, Bereich
-   - Steuerbescheid: Steuerart, Jahr, Ergebnis
-   - Arztbrief: Fachbereich, Behandlung, Diagnose
-   - Kostenvoranschlag: Gewerk, Projekt, Umfang
+VERBOTENE WÖRTER (NIEMALS als Tag verwenden):
+❌ dienstleistung, beleg, zahlung, kosten, kunde, kauf, produkt
+❌ rechnung, vertrag, dokument (= Dokumenttyp, nicht Tag!)
+❌ Der Firmenname des Absenders
+❌ Zufällige Wörter aus dem Dokument die nicht das Hauptthema sind
 
-WICHTIG für Tags:
-- Nenne konkrete Inhalte, nicht generische Begriffe
-- NICHT den Dokumenttyp wiederholen (kein "rechnung" wenn Typ=Rechnung)
-- NICHT den Absender wiederholen (kein "telekom" wenn Absender=Telekom)
-- NICHT: "dienstleistung", "dokument", "beleg", "zahlung", "kosten", "kunde"
+BEISPIELE:
 
-Antworte NUR mit JSON:
+Steelcase Bürostuhl-Rechnung von LEiK GmbH:
+→ Typ: rechnung | Tags: ["steelcase-please", "bürostuhl", "büromöbel", "arbeit", "vorkasse"]
+
+Home Assistant Adapter von BerryBase:
+→ Typ: rechnung | Tags: ["home-assistant-zbt2", "zigbee-adapter", "smarthome", "haustechnik", "kreditkarte"]
+
+DB Verspätungs-Erstattung:
+→ Typ: erstattung | Tags: ["fahrgastrechte", "verspätung", "bahnreise", "berlin-köln", "rückerstattung"]
+
+FlixTrain Bordkarte Berlin-Köln:
+→ Typ: fahrkarte | Tags: ["flixtrain", "berlin-köln", "zugticket", "fernreise", "sitzplatz"]
+
+Claude Pro Abo-Rechnung:
+→ Typ: rechnung | Tags: ["claude-pro", "ki-assistent", "software-abo", "arbeit", "monatlich"]
+
+═══════════════════════════════════════════════════════════════════
+
+Antworte NUR mit validem JSON:
 {
-    "document_type": "Dokumenttyp",
-    "correspondent": "Absender/Firma",
-    "tags": ["inhalt1", "inhalt2", "inhalt3", "inhalt4", "inhalt5"],
+    "document_type": "typ_kleingeschrieben",
+    "correspondent": "Firmenname",
+    "tags": ["hauptprodukt", "kategorie", "kontext", "detail", "optional"],
     "summary": "Ein Satz Zusammenfassung",
     "confidence": 0.95
 }"""

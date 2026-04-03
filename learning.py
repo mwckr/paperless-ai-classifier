@@ -328,21 +328,31 @@ def normalize_result(
     # 1. Document type normalization
     doc_type = result.get('document_type') or result.get('dokumenttyp')
     if doc_type:
+        # Normalize to lowercase first
+        doc_type_lower = doc_type.lower().strip()
+        
         # Check for learned mapping first
-        mapped = get_mapping('document_type', doc_type)
+        mapped = get_mapping('document_type', doc_type_lower)
         if mapped:
-            normalized['document_type'] = mapped
+            normalized['document_type'] = mapped.lower()
             normalized['_type_mapped'] = True
         elif existing_types:
-            # Fuzzy match against existing types
-            matched = fuzzy_match(doc_type, existing_types)
+            # Fuzzy match against existing types (case-insensitive)
+            existing_lower = [t.lower() for t in existing_types]
+            matched = fuzzy_match(doc_type_lower, existing_lower)
             if matched:
-                normalized['document_type'] = matched
+                # Find original case from existing_types
+                for orig in existing_types:
+                    if orig.lower() == matched.lower():
+                        normalized['document_type'] = orig
+                        break
+                else:
+                    normalized['document_type'] = matched
                 normalized['_type_fuzzy'] = True
             else:
-                normalized['document_type'] = doc_type
+                normalized['document_type'] = doc_type_lower
         else:
-            normalized['document_type'] = doc_type
+            normalized['document_type'] = doc_type_lower
     
     # 2. Correspondent normalization
     correspondent = result.get('correspondent') or result.get('absender')
@@ -368,7 +378,41 @@ def normalize_result(
     # 3. Tag normalization
     tags = result.get('tags', [])
     normalized_tags = []
+    
+    # Forbidden generic tags that should never be used
+    FORBIDDEN_TAGS = {
+        'dienstleistung', 'beleg', 'zahlung', 'kosten', 'kunde', 'kauf', 
+        'produkt', 'rechnung', 'vertrag', 'dokument', 'service', 'leistung',
+        'preis', 'betrag', 'summe', 'gesamt', 'netto', 'brutto', 'mwst',
+        'umsatzsteuer', 'steuer', 'euro', 'eur', 'bezahlung', 'bezahlt'
+    }
+    
+    # Also filter out correspondent name and document type
+    doc_type_lower = (normalized.get('document_type') or '').lower()
+    correspondent_lower = (normalized.get('correspondent') or '').lower()
+    correspondent_words = set(correspondent_lower.replace('-', ' ').replace('_', ' ').split())
+    
     for tag in tags:
+        if not tag or not isinstance(tag, str):
+            continue
+            
+        tag_lower = tag.lower().strip()
+        
+        # Skip forbidden tags
+        if tag_lower in FORBIDDEN_TAGS:
+            logger.debug(f"Filtered forbidden tag: {tag}")
+            continue
+        
+        # Skip if tag is the document type
+        if tag_lower == doc_type_lower:
+            logger.debug(f"Filtered tag matching doc type: {tag}")
+            continue
+        
+        # Skip if tag matches correspondent name or part of it
+        if tag_lower in correspondent_words or tag_lower == correspondent_lower:
+            logger.debug(f"Filtered tag matching correspondent: {tag}")
+            continue
+        
         # Check for learned mapping
         mapped = get_mapping('tag', tag)
         if mapped:
