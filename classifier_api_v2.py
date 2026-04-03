@@ -127,9 +127,35 @@ def log_to_audit(
     explanation: str = None,
     ai_raw: str = None
 ):
-    """Log processing result to audit database"""
+    """Log processing result to audit database. Updates existing 'processing' entry if completing."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    
+    # If we're completing/failing, update the existing 'processing' entry instead of creating new
+    if status in ('completed', 'failed', 'abandoned'):
+        c.execute('''
+            UPDATE audit_log 
+            SET status = ?, document_type = ?, correspondent = ?, tags = ?, 
+                confidence = ?, processing_time = ?, tokens_used = ?, 
+                auto_approved = ?, error_message = ?, explanation = ?, ai_raw = ?,
+                timestamp = ?
+            WHERE document_id = ? AND status = 'processing'
+        ''', (
+            status, document_type, correspondent,
+            json.dumps(tags) if tags else None,
+            confidence, processing_time, tokens_used,
+            1 if auto_approved else 0, error_message, explanation, ai_raw,
+            datetime.now().isoformat(),
+            document_id
+        ))
+        
+        # If we updated an existing row, we're done
+        if c.rowcount > 0:
+            conn.commit()
+            conn.close()
+            return
+    
+    # Otherwise insert new entry (for 'processing' status or if no existing entry found)
     c.execute('''
         INSERT INTO audit_log 
         (document_id, document_title, timestamp, status, document_type, correspondent, 
@@ -277,26 +303,43 @@ def setup_model():
     return model_module
 
 # Learning functions
-def apply_learning_correction(audit_id: int, document_type: str = None, correspondent: str = None, tags: List[str] = None):
-    """Apply a user correction and learn from it"""
+def apply_learning_correction(
+    audit_id: int, 
+    corrections: Dict,  # {field: {ai_value, user_value, sync_to_paperless}}
+    document_id: int = None
+):
+    """
+    Apply user corrections and learn from them.
+    
+    corrections format:
+    {
+        'document_type': {'ai': 'Beleg', 'user': 'Rechnung', 'sync': True},
+        'correspondent': {'ai': 'Anthropic', 'user': 'Anthropic, PBC', 'sync': True},
+        'tags': {'ai': ['a', 'b'], 'user': ['x', 'y'], 'sync': True}
+    }
+    """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     
-    # Get original AI suggestion
+    # Get the audit entry
     c.execute('SELECT * FROM audit_log WHERE id = ?', (audit_id,))
     row = c.fetchone()
     if not row:
         conn.close()
-        return False
+        return {"success": False, "error": "Audit entry not found"}
     
     original = dict(row)
-    original_tags = json.loads(original.get('tags', '[]')) if original.get('tags') else []
+    doc_id = document_id or original.get('document_id')
+    mappings_created = []
     
-    # Learn document type mapping
-    if document_type and original.get('document_type'):
-        ai_type = original['document_type']
-        if ai_type.lower() != document_type.lower():
+    # Process document_type correction
+    if 'document_type' in corrections:
+        corr = corrections['document_type']
+        ai_val = corr.get('ai', '').strip()
+        user_val = corr.get('user', '').strip()
+        
+        if ai_val and user_val and ai_val.lower() != user_val.lower():
             c.execute('''
                 INSERT INTO term_mappings (term_type, ai_term, approved_term)
                 VALUES ('document_type', ?, ?)
@@ -304,13 +347,17 @@ def apply_learning_correction(audit_id: int, document_type: str = None, correspo
                     approved_term = excluded.approved_term,
                     times_used = times_used + 1,
                     last_used = strftime('%s', 'now')
-            ''', (ai_type, document_type))
-            logger.info(f"Learned mapping: document_type '{ai_type}' → '{document_type}'")
+            ''', (ai_val, user_val))
+            mappings_created.append(f"document_type: {ai_val} → {user_val}")
+            logger.info(f"Learned: document_type '{ai_val}' → '{user_val}'")
     
-    # Learn correspondent mapping
-    if correspondent and original.get('correspondent'):
-        ai_corr = original['correspondent']
-        if ai_corr.lower() != correspondent.lower():
+    # Process correspondent correction
+    if 'correspondent' in corrections:
+        corr = corrections['correspondent']
+        ai_val = corr.get('ai', '').strip()
+        user_val = corr.get('user', '').strip()
+        
+        if ai_val and user_val and ai_val.lower() != user_val.lower():
             c.execute('''
                 INSERT INTO term_mappings (term_type, ai_term, approved_term)
                 VALUES ('correspondent', ?, ?)
@@ -318,43 +365,192 @@ def apply_learning_correction(audit_id: int, document_type: str = None, correspo
                     approved_term = excluded.approved_term,
                     times_used = times_used + 1,
                     last_used = strftime('%s', 'now')
-            ''', (ai_corr, correspondent))
-            logger.info(f"Learned mapping: correspondent '{ai_corr}' → '{correspondent}'")
+            ''', (ai_val, user_val))
+            mappings_created.append(f"correspondent: {ai_val} → {user_val}")
+            logger.info(f"Learned: correspondent '{ai_val}' → '{user_val}'")
     
-    # Learn tag mappings (fuzzy)
-    if tags:
-        from difflib import SequenceMatcher
-        for ai_tag in original_tags:
-            for user_tag in tags:
-                ratio = SequenceMatcher(None, ai_tag.lower(), user_tag.lower()).ratio()
-                if 0.5 < ratio < 1.0:  # Similar but not exact
-                    c.execute('''
-                        INSERT INTO term_mappings (term_type, ai_term, approved_term)
-                        VALUES ('tag', ?, ?)
-                        ON CONFLICT(term_type, ai_term) DO UPDATE SET 
-                            approved_term = excluded.approved_term,
-                            times_used = times_used + 1,
-                            last_used = strftime('%s', 'now')
-                    ''', (ai_tag, user_tag))
-                    logger.info(f"Learned mapping: tag '{ai_tag}' → '{user_tag}'")
+    # Process tag corrections - ONLY create mappings for explicit 1:1 replacements
+    # User must add tag mappings manually via Mappings tab for complex cases
+    if 'tag_mappings' in corrections:
+        # Explicit tag mappings: [{ai: 'x', user: 'y'}, ...]
+        for tm in corrections['tag_mappings']:
+            ai_tag = tm.get('ai', '').strip()
+            user_tag = tm.get('user', '').strip()
+            if ai_tag and user_tag and ai_tag.lower() != user_tag.lower():
+                c.execute('''
+                    INSERT INTO term_mappings (term_type, ai_term, approved_term)
+                    VALUES ('tag', ?, ?)
+                    ON CONFLICT(term_type, ai_term) DO UPDATE SET 
+                        approved_term = excluded.approved_term,
+                        times_used = times_used + 1,
+                        last_used = strftime('%s', 'now')
+                ''', (ai_tag, user_tag))
+                mappings_created.append(f"tag: {ai_tag} → {user_tag}")
+                logger.info(f"Learned: tag '{ai_tag}' → '{user_tag}'")
     
-    # Add as verified example
+    # Add as verified example with user-corrected values
+    user_type = corrections.get('document_type', {}).get('user') or original.get('document_type')
+    user_corr = corrections.get('correspondent', {}).get('user') or original.get('correspondent')
+    user_tags = corrections.get('tags', {}).get('user') or json.loads(original.get('tags', '[]'))
+    
     c.execute('''
         INSERT INTO classification_examples 
         (document_id, document_title, document_type, correspondent, tags, confidence, user_verified)
         VALUES (?, ?, ?, ?, ?, ?, 1)
     ''', (
-        original['document_id'],
+        doc_id,
         original.get('document_title', ''),
-        document_type or original.get('document_type'),
-        correspondent or original.get('correspondent'),
-        json.dumps(tags) if tags else original.get('tags'),
+        user_type,
+        user_corr,
+        json.dumps(user_tags) if isinstance(user_tags, list) else user_tags,
         original.get('confidence', 0.9)
     ))
     
     conn.commit()
     conn.close()
-    return True
+    
+    # Sync to Paperless if requested
+    paperless_updated = False
+    if any(c.get('sync') for c in corrections.values() if isinstance(c, dict)):
+        paperless_updated = sync_correction_to_paperless(doc_id, corrections)
+    
+    return {
+        "success": True, 
+        "mappings_created": mappings_created,
+        "paperless_updated": paperless_updated
+    }
+
+
+def sync_correction_to_paperless(doc_id: int, corrections: Dict) -> bool:
+    """Sync user corrections to Paperless via API"""
+    cfg = get_config()
+    headers = {
+        "Authorization": f"Token {cfg['PAPERLESS_TOKEN']}",
+        "Content-Type": "application/json"
+    }
+    base_url = cfg['PAPERLESS_URL']
+    
+    try:
+        update_data = {}
+        
+        # Document type
+        if corrections.get('document_type', {}).get('sync'):
+            type_name = corrections['document_type'].get('user')
+            if type_name:
+                # Get or create document type
+                resp = requests.get(f"{base_url}/api/document_types/", headers=headers, 
+                                   params={"name__iexact": type_name}, timeout=10)
+                if resp.status_code == 200:
+                    results = resp.json().get("results", [])
+                    if results:
+                        update_data['document_type'] = results[0]['id']
+                    else:
+                        # Create new
+                        resp = requests.post(f"{base_url}/api/document_types/", headers=headers,
+                                           json={"name": type_name}, timeout=10)
+                        if resp.status_code == 201:
+                            update_data['document_type'] = resp.json()['id']
+        
+        # Correspondent
+        if corrections.get('correspondent', {}).get('sync'):
+            corr_name = corrections['correspondent'].get('user')
+            if corr_name:
+                resp = requests.get(f"{base_url}/api/correspondents/", headers=headers,
+                                   params={"name__iexact": corr_name}, timeout=10)
+                if resp.status_code == 200:
+                    results = resp.json().get("results", [])
+                    if results:
+                        update_data['correspondent'] = results[0]['id']
+                    else:
+                        resp = requests.post(f"{base_url}/api/correspondents/", headers=headers,
+                                           json={"name": corr_name}, timeout=10)
+                        if resp.status_code == 201:
+                            update_data['correspondent'] = resp.json()['id']
+        
+        # Tags
+        if corrections.get('tags', {}).get('sync'):
+            user_tags = corrections['tags'].get('user', [])
+            if user_tags:
+                tag_ids = []
+                for tag_name in user_tags:
+                    resp = requests.get(f"{base_url}/api/tags/", headers=headers,
+                                       params={"name__iexact": tag_name}, timeout=10)
+                    if resp.status_code == 200:
+                        results = resp.json().get("results", [])
+                        if results:
+                            tag_ids.append(results[0]['id'])
+                        else:
+                            resp = requests.post(f"{base_url}/api/tags/", headers=headers,
+                                               json={"name": tag_name}, timeout=10)
+                            if resp.status_code == 201:
+                                tag_ids.append(resp.json()['id'])
+                if tag_ids:
+                    update_data['tags'] = tag_ids
+        
+        # Apply updates to Paperless
+        if update_data:
+            resp = requests.patch(f"{base_url}/api/documents/{doc_id}/", headers=headers,
+                                json=update_data, timeout=15)
+            if resp.status_code == 200:
+                logger.info(f"Synced corrections to Paperless for doc {doc_id}: {list(update_data.keys())}")
+                return True
+            else:
+                logger.error(f"Failed to sync to Paperless: {resp.status_code} {resp.text}")
+                return False
+        
+        return True  # Nothing to sync
+        
+    except Exception as e:
+        logger.error(f"Error syncing to Paperless: {e}")
+        return False
+
+
+def get_paperless_document(doc_id: int) -> Optional[Dict]:
+    """Fetch current document data from Paperless"""
+    cfg = get_config()
+    headers = {"Authorization": f"Token {cfg['PAPERLESS_TOKEN']}"}
+    
+    try:
+        resp = requests.get(f"{cfg['PAPERLESS_URL']}/api/documents/{doc_id}/", 
+                          headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return None
+        
+        doc = resp.json()
+        result = {
+            'id': doc['id'],
+            'title': doc.get('title', ''),
+            'document_type': None,
+            'correspondent': None,
+            'tags': []
+        }
+        
+        # Fetch document type name
+        if doc.get('document_type'):
+            resp = requests.get(f"{cfg['PAPERLESS_URL']}/api/document_types/{doc['document_type']}/",
+                              headers=headers, timeout=10)
+            if resp.status_code == 200:
+                result['document_type'] = resp.json().get('name')
+        
+        # Fetch correspondent name
+        if doc.get('correspondent'):
+            resp = requests.get(f"{cfg['PAPERLESS_URL']}/api/correspondents/{doc['correspondent']}/",
+                              headers=headers, timeout=10)
+            if resp.status_code == 200:
+                result['correspondent'] = resp.json().get('name')
+        
+        # Fetch tag names
+        for tag_id in doc.get('tags', []):
+            resp = requests.get(f"{cfg['PAPERLESS_URL']}/api/tags/{tag_id}/",
+                              headers=headers, timeout=10)
+            if resp.status_code == 200:
+                result['tags'].append(resp.json().get('name'))
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error fetching from Paperless: {e}")
+        return None
 
 
 async def poll_for_new_documents():
@@ -849,24 +1045,66 @@ DASHBOARD_HTML = '''
     
     <!-- Edit Classification Modal -->
     <div id="edit-modal" class="modal">
-        <div class="modal-content">
+        <div class="modal-content" style="max-width: 700px;">
             <button class="modal-close" onclick="closeModal()">&times;</button>
             <h3>Correct Classification</h3>
+            <p style="color: #888; margin-bottom: 15px; font-size: 0.9em;">
+                Compare AI suggestions with current Paperless data. Check boxes to sync corrections to Paperless.
+            </p>
             <input type="hidden" id="edit-audit-id">
-            <div class="train-form">
-                <div>
-                    <label>Document Type</label>
-                    <input type="text" id="edit-type" placeholder="Corrected type">
+            <input type="hidden" id="edit-doc-id">
+            
+            <div id="edit-loading" style="text-align: center; padding: 20px; color: #888;">
+                <span class="spinner"></span> Loading document data...
+            </div>
+            
+            <div id="edit-form" style="display: none;">
+                <table style="width: 100%; margin-bottom: 20px;">
+                    <thead>
+                        <tr>
+                            <th style="width: 25%;">Field</th>
+                            <th style="width: 30%;">AI Suggested</th>
+                            <th style="width: 30%;">Your Correction</th>
+                            <th style="width: 15%;">Sync</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Document Type</strong></td>
+                            <td><span id="edit-ai-type" class="tag">-</span></td>
+                            <td><input type="text" id="edit-type" style="width: 100%;"></td>
+                            <td><label><input type="checkbox" id="edit-sync-type" checked> Write</label></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Correspondent</strong></td>
+                            <td><span id="edit-ai-corr" class="tag">-</span></td>
+                            <td><input type="text" id="edit-correspondent" style="width: 100%;"></td>
+                            <td><label><input type="checkbox" id="edit-sync-corr" checked> Write</label></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Tags</strong></td>
+                            <td><span id="edit-ai-tags" style="font-size: 0.85em;">-</span></td>
+                            <td><input type="text" id="edit-tags" style="width: 100%;" placeholder="comma separated"></td>
+                            <td><label><input type="checkbox" id="edit-sync-tags" checked> Write</label></td>
+                        </tr>
+                    </tbody>
+                </table>
+                
+                <div style="background: #0f1a2e; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                    <strong style="color: #00d4ff;">Current Paperless Data</strong>
+                    <div id="edit-paperless-data" style="margin-top: 10px; font-size: 0.9em; color: #888;">
+                        Loading...
+                    </div>
                 </div>
-                <div>
-                    <label>Correspondent</label>
-                    <input type="text" id="edit-correspondent" placeholder="Corrected correspondent">
+                
+                <div style="display: flex; gap: 10px;">
+                    <button onclick="submitCorrection()" class="success">Save & Learn</button>
+                    <button onclick="closeModal()">Cancel</button>
                 </div>
-                <div>
-                    <label>Tags (comma separated)</label>
-                    <input type="text" id="edit-tags" placeholder="tag1, tag2, tag3">
-                </div>
-                <button onclick="submitCorrection()" class="success">Save & Learn</button>
+                <p style="color: #666; font-size: 0.8em; margin-top: 10px;">
+                    • Mappings are only created when AI value differs from your correction<br>
+                    • "Sync" writes your correction to Paperless, overwriting current data
+                </p>
             </div>
         </div>
     </div>
@@ -890,12 +1128,121 @@ DASHBOARD_HTML = '''
             document.getElementById('add-mapping-modal').classList.add('active');
         }
         
-        function showEditModal(auditId, type, correspondent, tags) {
+        // Store current edit data
+        let currentEditData = { ai: {}, paperless: {} };
+        
+        async function showEditModal(auditId, docId, aiType, aiCorr, aiTags) {
+            // Reset and show loading
             document.getElementById('edit-audit-id').value = auditId;
-            document.getElementById('edit-type').value = type || '';
-            document.getElementById('edit-correspondent').value = correspondent || '';
-            document.getElementById('edit-tags').value = (tags || []).join(', ');
+            document.getElementById('edit-doc-id').value = docId;
+            document.getElementById('edit-loading').style.display = 'block';
+            document.getElementById('edit-form').style.display = 'none';
             document.getElementById('edit-modal').classList.add('active');
+            
+            // Store AI data
+            currentEditData.ai = {
+                document_type: aiType || '',
+                correspondent: aiCorr || '',
+                tags: aiTags || []
+            };
+            
+            // Display AI data
+            document.getElementById('edit-ai-type').textContent = aiType || '-';
+            document.getElementById('edit-ai-corr').textContent = aiCorr || '-';
+            document.getElementById('edit-ai-tags').innerHTML = (aiTags || []).map(t => `<span class="tag">${t}</span>`).join(' ') || '-';
+            
+            // Pre-fill correction fields with AI data
+            document.getElementById('edit-type').value = aiType || '';
+            document.getElementById('edit-correspondent').value = aiCorr || '';
+            document.getElementById('edit-tags').value = (aiTags || []).join(', ');
+            
+            // Fetch current Paperless data
+            try {
+                const resp = await fetch(`/api/paperless/document/${docId}`);
+                const data = await resp.json();
+                
+                if (data.success && data.document) {
+                    currentEditData.paperless = data.document;
+                    const pd = data.document;
+                    document.getElementById('edit-paperless-data').innerHTML = `
+                        <div><strong>Type:</strong> ${pd.document_type || '<em>not set</em>'}</div>
+                        <div><strong>Correspondent:</strong> ${pd.correspondent || '<em>not set</em>'}</div>
+                        <div><strong>Tags:</strong> ${pd.tags.length ? pd.tags.join(', ') : '<em>none</em>'}</div>
+                    `;
+                } else {
+                    document.getElementById('edit-paperless-data').innerHTML = '<em>Could not fetch Paperless data</em>';
+                }
+            } catch (e) {
+                document.getElementById('edit-paperless-data').innerHTML = '<em>Error fetching data</em>';
+            }
+            
+            // Show form
+            document.getElementById('edit-loading').style.display = 'none';
+            document.getElementById('edit-form').style.display = 'block';
+        }
+        
+        async function submitCorrection() {
+            const auditId = parseInt(document.getElementById('edit-audit-id').value);
+            const docId = parseInt(document.getElementById('edit-doc-id').value);
+            const userType = document.getElementById('edit-type').value.trim();
+            const userCorr = document.getElementById('edit-correspondent').value.trim();
+            const userTagsStr = document.getElementById('edit-tags').value;
+            const userTags = userTagsStr ? userTagsStr.split(',').map(t => t.trim()).filter(t => t) : [];
+            
+            const syncType = document.getElementById('edit-sync-type').checked;
+            const syncCorr = document.getElementById('edit-sync-corr').checked;
+            const syncTags = document.getElementById('edit-sync-tags').checked;
+            
+            // Build corrections object with explicit AI values
+            const corrections = {};
+            
+            if (userType) {
+                corrections.document_type = {
+                    ai: currentEditData.ai.document_type,
+                    user: userType,
+                    sync: syncType
+                };
+            }
+            
+            if (userCorr) {
+                corrections.correspondent = {
+                    ai: currentEditData.ai.correspondent,
+                    user: userCorr,
+                    sync: syncCorr
+                };
+            }
+            
+            if (userTags.length > 0) {
+                corrections.tags = {
+                    ai: currentEditData.ai.tags,
+                    user: userTags,
+                    sync: syncTags
+                };
+            }
+            
+            // Submit correction
+            const resp = await fetch('/api/learn/correct', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ 
+                    audit_id: auditId, 
+                    document_id: docId,
+                    corrections: corrections 
+                })
+            });
+            
+            const result = await resp.json();
+            closeModal();
+            refreshMappings();
+            
+            let msg = 'Correction saved!';
+            if (result.mappings_created && result.mappings_created.length > 0) {
+                msg += '\\n\\nLearned mappings:\\n• ' + result.mappings_created.join('\\n• ');
+            }
+            if (result.paperless_updated) {
+                msg += '\\n\\nPaperless updated successfully.';
+            }
+            alert(msg);
         }
         
         async function fetchJson(url) {
@@ -982,7 +1329,7 @@ DASHBOARD_HTML = '''
                     tbody.innerHTML = completedLogs.map(log => {
                         const tags = (log.tags || []).map(t => `<span class="tag">${t}</span>`).join('');
                         const conf = log.confidence ? Math.round(log.confidence * 100) + '%' : '-';
-                        const tagsStr = (log.tags || []).join(',');
+                        const tagsArr = JSON.stringify(log.tags || []);
                         
                         return `<tr>
                             <td><strong>#${log.document_id}</strong><br><small>${(log.document_title || '').substring(0, 40)}</small></td>
@@ -990,7 +1337,7 @@ DASHBOARD_HTML = '''
                             <td>${log.correspondent || '-'}</td>
                             <td>${tags || '-'}</td>
                             <td>${conf}</td>
-                            <td><button class="edit-btn" onclick="showEditModal(${log.id}, '${log.document_type || ''}', '${log.correspondent || ''}', [${(log.tags||[]).map(t=>"'"+t+"'").join(',')}])">Correct</button></td>
+                            <td><button class="edit-btn" onclick='showEditModal(${log.id}, ${log.document_id}, "${(log.document_type || '').replace(/"/g, '\\"')}", "${(log.correspondent || '').replace(/"/g, '\\"')}", ${tagsArr})'>Correct</button></td>
                         </tr>`;
                     }).join('');
                 } else {
@@ -1051,24 +1398,6 @@ DASHBOARD_HTML = '''
                 if (el) await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ key, value: el.value }) });
             }
             alert('Saved! Restart service for changes to take effect.');
-        }
-        
-        async function submitCorrection() {
-            const auditId = document.getElementById('edit-audit-id').value;
-            const type = document.getElementById('edit-type').value;
-            const correspondent = document.getElementById('edit-correspondent').value;
-            const tagsStr = document.getElementById('edit-tags').value;
-            const tags = tagsStr ? tagsStr.split(',').map(t => t.trim()).filter(t => t) : [];
-            
-            await fetch('/api/learn/correct', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ audit_id: parseInt(auditId), document_type: type, correspondent, tags })
-            });
-            
-            closeModal();
-            refreshMappings();
-            alert('Correction saved! The system has learned from your input.');
         }
         
         async function addMapping() {
@@ -1284,14 +1613,45 @@ async def delete_mapping(mapping_id: int):
     return {"status": "deleted" if deleted else "not_found"}
 
 @app.post("/api/learn/correct")
-async def learn_from_correction(correction: CorrectionRequest):
-    success = apply_learning_correction(
-        correction.audit_id,
-        correction.document_type,
-        correction.correspondent,
-        correction.tags
-    )
-    return {"status": "learned" if success else "failed"}
+async def learn_from_correction(request: Request):
+    """
+    Apply user corrections with explicit field tracking.
+    
+    Body format:
+    {
+        "audit_id": 123,
+        "document_id": 74,
+        "corrections": {
+            "document_type": {"ai": "Beleg", "user": "Rechnung", "sync": true},
+            "correspondent": {"ai": "Anthropic", "user": "Anthropic, PBC", "sync": true},
+            "tags": {"ai": ["a", "b"], "user": ["x", "y"], "sync": true},
+            "tag_mappings": [{"ai": "old-tag", "user": "new-tag"}]
+        }
+    }
+    """
+    try:
+        data = await request.json()
+    except:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    
+    audit_id = data.get('audit_id')
+    document_id = data.get('document_id')
+    corrections = data.get('corrections', {})
+    
+    if not audit_id:
+        raise HTTPException(status_code=400, detail="audit_id required")
+    
+    result = apply_learning_correction(audit_id, corrections, document_id)
+    return result
+
+
+@app.get("/api/paperless/document/{doc_id}")
+async def get_paperless_doc(doc_id: int):
+    """Fetch current document data from Paperless for comparison"""
+    doc = get_paperless_document(doc_id)
+    if doc:
+        return {"success": True, "document": doc}
+    return {"success": False, "error": "Could not fetch document"}
 
 # Webhooks
 @app.post("/webhook/paperless/{doc_id}")

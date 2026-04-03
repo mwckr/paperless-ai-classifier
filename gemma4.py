@@ -262,19 +262,30 @@ def analyze_with_vision(image_bytes: bytes, content_type: str) -> Tuple[bool, Op
 Bestimme:
 1. Dokumenttyp (z.B. "Rechnung", "Vertrag", "Bescheid", "Kontoauszug", etc.)
 2. Absender/Firma (Name wie er auf dem Dokument erscheint)
-3. 3-5 relevante Tags zur Organisation
+3. 5 relevante Tags zur Organisation (siehe TAG-REGELN unten)
 4. Kurze Zusammenfassung (1 Satz)
 
 WICHTIG: 
 - dokumenttyp und tags MÜSSEN auf Deutsch sein
-- Wenn die Überschrift den Typ nennt (z.B. "Rechnung"), diesen DIREKT übernehmen
-- Tags sollten allgemein + spezifisch sein
+- Wenn die Überschrift den Typ nennt (z.B. "Rechnung", "Receipt"), diesen DIREKT übernehmen
+
+TAG-REGELN - Beschreibe das Dokument in 5 Worten:
+- Tag 1: Dokumentkategorie (z.B. "rechnung", "vertrag", "bescheid")
+- Tag 2: Branche/Bereich (z.B. "software", "versicherung", "energie", "telekommunikation")
+- Tag 3-4: Konkretes Produkt/Dienstleistung auf dem Dokument (z.B. "claude-pro", "iphone-15", "kfz-versicherung", "stromvertrag")
+- Tag 5: Zusätzliches Detail (z.B. "monatlich", "einmalig", "abonnement", Zahlungsart)
+
+BEISPIELE für gute Tags:
+- Claude Pro Rechnung: ["rechnung", "software", "claude-pro", "abonnement", "ki-assistent"]
+- Amazon Bestellung: ["rechnung", "online-shopping", "kopfhörer-airpods", "elektronik", "einmalkauf"]
+- Stromrechnung: ["rechnung", "energie", "strom", "haushalt", "monatlich"]
+- Mietvertrag: ["vertrag", "wohnen", "mietvertrag", "miete", "unbefristet"]
 
 EXISTIERENDE TAGS (wenn passend, exakt wiederverwenden):
 {existing_tags_str}
 
 Antworte NUR mit gültigem JSON:
-{{"dokumenttyp": "Typ auf Deutsch", "absender": "Firmenname", "tags": ["tag1", "tag2", "tag3"], "zusammenfassung": "Kurze Beschreibung", "konfidenz": 0.95}}"""
+{{"dokumenttyp": "Typ auf Deutsch", "absender": "Firmenname", "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"], "zusammenfassung": "Kurze Beschreibung", "konfidenz": 0.95}}"""
 
     payload = {
         "model": OLLAMA_MODEL,
