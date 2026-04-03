@@ -7,6 +7,7 @@ FastAPI service with:
 - Gemma 4 / Ministral model support
 - Learning layer for continuous improvement
 - Dashboard training interface
+- Export logs for debugging
 """
 import os
 import asyncio
@@ -14,12 +15,15 @@ import sqlite3
 import logging
 import json
 import requests
+import platform
+import shutil
+import glob
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from pathlib import Path
 from dotenv import load_dotenv, set_key
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 import uvicorn
@@ -29,6 +33,12 @@ ENV_FILE = Path(__file__).parent / ".env"
 if not ENV_FILE.exists():
     ENV_FILE = Path("/opt/paperless-classifier/.env")
 load_dotenv(ENV_FILE)
+
+# Logs directory setup
+LOGS_DIR = Path(__file__).parent / "logs"
+LOGS_DIR.mkdir(exist_ok=True)
+LOG_RETENTION_DAYS = 7
+LOG_MAX_SIZE_MB = 50
 
 # Configuration from .env
 def get_config():
@@ -849,6 +859,7 @@ DASHBOARD_HTML = '''
             <button class="tab active" onclick="showTab('status')">Status</button>
             <button class="tab" onclick="showTab('training')">Training</button>
             <button class="tab" onclick="showTab('mappings')">Mappings</button>
+            <button class="tab" onclick="showTab('export')">Export</button>
             <button class="tab" onclick="showTab('config')">Config</button>
         </div>
         
@@ -941,7 +952,7 @@ DASHBOARD_HTML = '''
                                 <th>Tags</th>
                                 <th>Conf</th>
                                 <th>Status</th>
-                                <th></th>
+                                <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody id="audit-log"></tbody>
@@ -1008,6 +1019,45 @@ DASHBOARD_HTML = '''
                     <button onclick="saveConfig()">Save Configuration</button>
                 </div>
                 <div class="refresh-info">Changes require service restart to take effect.</div>
+            </div>
+        </div>
+        
+        <!-- EXPORT TAB -->
+        <div id="tab-export" class="tab-content">
+            <div class="card">
+                <h3>Export Debug Logs</h3>
+                <p style="color: #888; margin-bottom: 15px;">
+                    Generate comprehensive debug exports for troubleshooting. Includes system info, 
+                    recent runs, mappings, and application logs.
+                </p>
+                <div class="actions">
+                    <button onclick="generateExport()" class="success">Generate New Export</button>
+                    <button onclick="refreshExports()">Refresh List</button>
+                </div>
+                <div style="margin-top: 15px; padding: 10px; background: #0f1a2e; border-radius: 5px;">
+                    <small style="color: #666;">
+                        Logs are stored in /logs folder. Auto-cleanup: files older than 7 days or when total exceeds 50MB.
+                    </small>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>Available Exports</h3>
+                <div style="overflow-x: auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Filename</th>
+                                <th>Size</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="exports-list">
+                            <tr><td colspan="4" style="color: #888;">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
         
@@ -1118,6 +1168,7 @@ DASHBOARD_HTML = '''
             
             if (tabName === 'training') refreshTraining();
             if (tabName === 'mappings') refreshMappings();
+            if (tabName === 'export') refreshExports();
         }
         
         function closeModal() {
@@ -1310,7 +1361,10 @@ DASHBOARD_HTML = '''
                             <td>${tags || '-'}</td>
                             <td>${conf}</td>
                             <td><span class="status-badge ${statusClass}">${log.status}</span></td>
-                            <td><button onclick="deleteEntry(${log.id})" class="delete-btn">×</button></td>
+                            <td>
+                                <button onclick="reanalyze(${log.document_id})" class="edit-btn" title="Re-analyze">↻</button>
+                                <button onclick="deleteEntry(${log.id})" class="delete-btn" title="Delete">×</button>
+                            </td>
                         </tr>`;
                     }).join('');
                 } else {
@@ -1337,7 +1391,10 @@ DASHBOARD_HTML = '''
                             <td>${log.correspondent || '-'}</td>
                             <td>${tags || '-'}</td>
                             <td>${conf}</td>
-                            <td><button class="edit-btn" onclick='showEditModal(${log.id}, ${log.document_id}, "${(log.document_type || '').replace(/"/g, '\\"')}", "${(log.correspondent || '').replace(/"/g, '\\"')}", ${tagsArr})'>Correct</button></td>
+                            <td>
+                                <button class="edit-btn" onclick='showEditModal(${log.id}, ${log.document_id}, "${(log.document_type || '').replace(/"/g, '\\"')}", "${(log.correspondent || '').replace(/"/g, '\\"')}", ${tagsArr})'>Correct</button>
+                                <button class="edit-btn" onclick="reanalyze(${log.document_id})" title="Re-analyze">↻ Redo</button>
+                            </td>
                         </tr>`;
                     }).join('');
                 } else {
@@ -1447,6 +1504,76 @@ DASHBOARD_HTML = '''
             if (confirm('Delete all "' + status + '" entries?')) {
                 await fetch('/api/audit/status/' + status, { method: 'DELETE' });
                 refreshAll();
+            }
+        }
+        
+        async function reanalyze(docId) {
+            if (confirm('Re-analyze document #' + docId + '? This will queue it for processing.')) {
+                await fetch('/api/reanalyze/' + docId, { method: 'POST' });
+                alert('Document #' + docId + ' queued for re-analysis');
+                refreshAll();
+            }
+        }
+        
+        async function generateExport() {
+            try {
+                const btn = event.target;
+                btn.textContent = 'Generating...';
+                btn.disabled = true;
+                
+                const resp = await fetch('/api/export/debug');
+                if (resp.ok) {
+                    const blob = await resp.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = resp.headers.get('content-disposition')?.split('filename=')[1] || 'debug_export.json';
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    refreshExports();
+                } else {
+                    alert('Export failed: ' + (await resp.text()));
+                }
+            } catch (e) {
+                alert('Export error: ' + e.message);
+            } finally {
+                event.target.textContent = 'Generate New Export';
+                event.target.disabled = false;
+            }
+        }
+        
+        async function refreshExports() {
+            try {
+                const data = await fetchJson('/api/export/list');
+                const tbody = document.getElementById('exports-list');
+                
+                if (data.files && data.files.length > 0) {
+                    tbody.innerHTML = data.files.map(f => {
+                        const created = new Date(f.created).toLocaleString();
+                        return `<tr>
+                            <td><code>${f.filename}</code></td>
+                            <td>${f.size_kb} KB</td>
+                            <td>${created}</td>
+                            <td>
+                                <button class="edit-btn" onclick="downloadExport('${f.filename}')">Download</button>
+                                <button class="delete-btn" onclick="deleteExport('${f.filename}')">×</button>
+                            </td>
+                        </tr>`;
+                    }).join('');
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="4" style="color: #888;">No exports yet. Click "Generate New Export" to create one.</td></tr>';
+                }
+            } catch (e) { console.error(e); }
+        }
+        
+        async function downloadExport(filename) {
+            window.location.href = '/api/export/download/' + filename;
+        }
+        
+        async function deleteExport(filename) {
+            if (confirm('Delete export ' + filename + '?')) {
+                await fetch('/api/export/' + filename, { method: 'DELETE' });
+                refreshExports();
             }
         }
         
@@ -1652,6 +1779,218 @@ async def get_paperless_doc(doc_id: int):
     if doc:
         return {"success": True, "document": doc}
     return {"success": False, "error": "Could not fetch document"}
+
+
+# Re-analyze endpoint
+@app.post("/api/reanalyze/{doc_id}")
+async def reanalyze_document(doc_id: int):
+    """Re-queue a document for analysis"""
+    await document_queue.put(doc_id)
+    queue_status["pending_docs"].append(doc_id)
+    logger.info(f"Document {doc_id} queued for re-analysis")
+    return {"status": "queued", "document_id": doc_id}
+
+
+# Export logs functionality
+def cleanup_old_logs():
+    """Remove logs older than LOG_RETENTION_DAYS"""
+    cutoff = datetime.now() - timedelta(days=LOG_RETENTION_DAYS)
+    removed = 0
+    for log_file in LOGS_DIR.glob("*.json"):
+        try:
+            # Parse date from filename: debug_YYYYMMDD_HHMMSS.json
+            parts = log_file.stem.split("_")
+            if len(parts) >= 2:
+                date_str = parts[1]
+                file_date = datetime.strptime(date_str, "%Y%m%d")
+                if file_date < cutoff:
+                    log_file.unlink()
+                    removed += 1
+        except:
+            pass
+    
+    # Also check total size
+    total_size = sum(f.stat().st_size for f in LOGS_DIR.glob("*.json"))
+    if total_size > LOG_MAX_SIZE_MB * 1024 * 1024:
+        # Remove oldest files until under limit
+        files = sorted(LOGS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime)
+        while total_size > LOG_MAX_SIZE_MB * 1024 * 1024 and files:
+            oldest = files.pop(0)
+            total_size -= oldest.stat().st_size
+            oldest.unlink()
+            removed += 1
+    
+    return removed
+
+
+def generate_debug_export() -> Path:
+    """Generate a comprehensive debug export file"""
+    cleanup_old_logs()
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    export_file = LOGS_DIR / f"debug_{timestamp}.json"
+    
+    cfg = get_config()
+    
+    # System info
+    system_info = {
+        "timestamp": datetime.now().isoformat(),
+        "platform": platform.platform(),
+        "python_version": platform.python_version(),
+        "hostname": platform.node(),
+    }
+    
+    # API/Config info (sanitized)
+    api_info = {
+        "paperless_url": cfg["PAPERLESS_URL"],
+        "ollama_url": cfg["OLLAMA_URL"],
+        "ollama_model": cfg["OLLAMA_MODEL"],
+        "ollama_threads": cfg["OLLAMA_THREADS"],
+        "auto_commit": cfg["AUTO_COMMIT"],
+        "learning_enabled": cfg["LEARNING_ENABLED"],
+        "max_pages": cfg["MAX_PAGES"],
+    }
+    
+    # Service status
+    service_status = {
+        "service_started": queue_status.get("service_started"),
+        "processed_count": queue_status.get("processed_count", 0),
+        "last_processed": queue_status.get("last_processed"),
+        "current_processing": queue_status.get("processing", False),
+        "queue_size": document_queue.qsize() if document_queue else 0,
+    }
+    
+    # Health check
+    health = {"paperless": "unknown", "ollama": "unknown"}
+    try:
+        resp = requests.get(f"{cfg['PAPERLESS_URL']}/api/documents/", timeout=5)
+        health["paperless"] = "healthy" if resp.status_code == 200 else f"error_{resp.status_code}"
+    except Exception as e:
+        health["paperless"] = f"unreachable: {str(e)[:50]}"
+    try:
+        resp = requests.get(f"{cfg['OLLAMA_URL']}/api/tags", timeout=5)
+        health["ollama"] = "healthy" if resp.status_code == 200 else f"error_{resp.status_code}"
+        if resp.status_code == 200:
+            models = [m["name"] for m in resp.json().get("models", [])]
+            health["ollama_models"] = models
+    except Exception as e:
+        health["ollama"] = f"unreachable: {str(e)[:50]}"
+    
+    # Recent audit logs (last 50)
+    audit_logs = get_audit_logs(limit=50)
+    
+    # Statistics
+    stats = get_audit_stats()
+    
+    # Term mappings
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute('SELECT * FROM term_mappings ORDER BY last_used DESC LIMIT 100')
+    mappings = [dict(row) for row in c.fetchall()]
+    
+    # Classification examples
+    c.execute('SELECT * FROM classification_examples ORDER BY created_at DESC LIMIT 50')
+    examples = [dict(row) for row in c.fetchall()]
+    for ex in examples:
+        if ex.get('tags'):
+            try:
+                ex['tags'] = json.loads(ex['tags'])
+            except:
+                pass
+    conn.close()
+    
+    # Read recent application log
+    app_log_content = ""
+    app_log_path = Path(__file__).parent / "classifier_api.log"
+    if app_log_path.exists():
+        try:
+            with open(app_log_path, 'r') as f:
+                # Last 500 lines
+                lines = f.readlines()
+                app_log_content = "".join(lines[-500:])
+        except:
+            app_log_content = "Could not read log file"
+    
+    # Compile export
+    export_data = {
+        "export_info": {
+            "generated_at": datetime.now().isoformat(),
+            "version": "2.0.0",
+            "export_type": "debug"
+        },
+        "system": system_info,
+        "api_config": api_info,
+        "service_status": service_status,
+        "health_check": health,
+        "statistics": stats,
+        "recent_runs": audit_logs,
+        "term_mappings": mappings,
+        "classification_examples": examples,
+        "application_log": app_log_content
+    }
+    
+    with open(export_file, 'w') as f:
+        json.dump(export_data, f, indent=2, default=str)
+    
+    logger.info(f"Debug export generated: {export_file}")
+    return export_file
+
+
+@app.get("/api/export/debug")
+async def export_debug_logs():
+    """Generate and return a debug export file"""
+    try:
+        export_file = generate_debug_export()
+        return FileResponse(
+            path=export_file,
+            filename=export_file.name,
+            media_type="application/json"
+        )
+    except Exception as e:
+        logger.error(f"Export failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/export/list")
+async def list_exports():
+    """List available export files"""
+    files = []
+    for f in sorted(LOGS_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        files.append({
+            "filename": f.name,
+            "size_kb": round(f.stat().st_size / 1024, 1),
+            "created": datetime.fromtimestamp(f.stat().st_mtime).isoformat()
+        })
+    return {"files": files[:20]}  # Last 20
+
+
+@app.get("/api/export/download/{filename}")
+async def download_export(filename: str):
+    """Download a specific export file"""
+    # Sanitize filename
+    if ".." in filename or "/" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
+    file_path = LOGS_DIR / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(path=file_path, filename=filename, media_type="application/json")
+
+
+@app.delete("/api/export/{filename}")
+async def delete_export(filename: str):
+    """Delete an export file"""
+    if ".." in filename or "/" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
+    file_path = LOGS_DIR / filename
+    if file_path.exists():
+        file_path.unlink()
+        return {"status": "deleted", "filename": filename}
+    return {"status": "not_found"}
+
 
 # Webhooks
 @app.post("/webhook/paperless/{doc_id}")

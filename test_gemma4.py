@@ -200,23 +200,35 @@ WICHTIG:
 - dokumenttyp und tags MÜSSEN auf Deutsch sein
 - Wenn die Überschrift den Typ nennt (z.B. "Rechnung", "Receipt"), diesen DIREKT übernehmen
 
-TAG-REGELN - Beschreibe das Dokument in 5 Worten:
-- Tag 1: Dokumentkategorie (z.B. "rechnung", "vertrag", "bescheid")
-- Tag 2: Branche/Bereich (z.B. "software", "versicherung", "energie", "telekommunikation")
-- Tag 3-4: Konkretes Produkt/Dienstleistung auf dem Dokument (z.B. "claude-pro", "iphone-15", "kfz-versicherung", "stromvertrag")
-- Tag 5: Zusätzliches Detail (z.B. "monatlich", "einmalig", "abonnement", Zahlungsart)
+TAG-REGELN - 5 spezifische, inhaltsbezogene Tags:
 
-BEISPIELE für gute Tags:
-- Claude Pro Rechnung: ["rechnung", "software", "claude-pro", "abonnement", "ki-assistent"]
-- Amazon Bestellung: ["rechnung", "online-shopping", "kopfhörer-airpods", "elektronik", "einmalkauf"]
-- Stromrechnung: ["rechnung", "energie", "strom", "haushalt", "monatlich"]
-- Mietvertrag: ["vertrag", "wohnen", "mietvertrag", "miete", "unbefristet"]
+VERBOTEN in Tags:
+- NIEMALS den Dokumenttyp wiederholen (kein "rechnung", "beleg", "vertrag" als Tag wenn das der Typ ist)
+- NIEMALS den Absender/Firma wiederholen (kein "anthropic" als Tag wenn das der Correspondent ist)
+- NIEMALS generische Wörter: "dienstleistung", "dokument", "beleg", "zahlung", "kosten"
+
+WAS Tags beschreiben SOLLEN:
+- Tag 1-2: KONKRETES Produkt/Artikel auf dem Dokument (z.B. "claude-pro", "macbook-air", "hausratversicherung")
+- Tag 3: Branche/Kategorie (z.B. "ki-software", "elektronik", "versicherung", "energie")
+- Tag 4: Verwendungszweck/Kontext (z.B. "arbeit", "privat", "haushalt", "büro")
+- Tag 5: Zeitraum/Frequenz falls relevant (z.B. "monatlich", "jahresabo", "einmalig", "q1-2026")
+
+BEISPIELE:
+- Claude Pro Abo-Rechnung von Anthropic:
+  Typ: "Rechnung", Correspondent: "Anthropic, PBC"
+  Tags: ["claude-pro", "ki-software", "abo-monatlich", "arbeit", "april-2026"]
+  (NICHT: "rechnung", "anthropic", "dienstleistung", "zahlung")
+
+- iPhone Rechnung von Apple:
+  Typ: "Rechnung", Correspondent: "Apple Inc."
+  Tags: ["iphone-15-pro", "smartphone", "elektronik", "privat", "einmalkauf"]
+  (NICHT: "rechnung", "apple", "beleg", "kauf")
 
 Antworte NUR mit gültigem JSON:
 {
     "document_type": "Dokumenttyp auf Deutsch",
     "correspondent": "Firmenname wie auf Dokument",
-    "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
+    "tags": ["produkt1", "produkt2", "kategorie", "kontext", "zeitraum"],
     "summary": "Kurze Beschreibung des Dokuments",
     "confidence": 0.95,
     "language": "detected language"
