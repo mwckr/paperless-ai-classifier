@@ -53,8 +53,8 @@ def get_config():
         "AUTO_COMMIT": os.getenv("AUTO_COMMIT", "true").lower() == "true",
         "GENERATE_EXPLANATIONS": os.getenv("GENERATE_EXPLANATIONS", "false").lower() == "true",
         "LEARNING_ENABLED": os.getenv("LEARNING_ENABLED", "true").lower() == "true",
-        "FEW_SHOT_ENABLED": os.getenv("FEW_SHOT_ENABLED", "false").lower() == "true",  # Disable by default
-        "INJECT_EXISTING_TAGS": os.getenv("INJECT_EXISTING_TAGS", "false").lower() == "true",  # Disable by default
+        "FEW_SHOT_ENABLED": os.getenv("FEW_SHOT_ENABLED", "false").lower() == "true",
+        "INJECT_EXISTING_TAGS": os.getenv("INJECT_EXISTING_TAGS", "true").lower() == "true",  # Simple hint to reuse tags
         "API_HOST": os.getenv("API_HOST", "0.0.0.0"),
         "API_PORT": int(os.getenv("API_PORT", "8001")),
     }

@@ -375,54 +375,39 @@ def normalize_result(
     else:
         normalized['correspondent'] = None
     
-    # 3. Tag normalization
+    # 3. Tag normalization - simple, no hardcoded filters
     tags = result.get('tags', [])
     normalized_tags = []
     
-    # Forbidden generic tags that should never be used
-    FORBIDDEN_TAGS = {
-        'dienstleistung', 'beleg', 'zahlung', 'kosten', 'kunde', 'kauf', 
-        'produkt', 'rechnung', 'vertrag', 'dokument', 'service', 'leistung',
-        'preis', 'betrag', 'summe', 'gesamt', 'netto', 'brutto', 'mwst',
-        'umsatzsteuer', 'steuer', 'euro', 'eur', 'bezahlung', 'bezahlt'
-    }
-    
-    # Also filter out correspondent name and document type
-    doc_type_lower = (normalized.get('document_type') or '').lower()
-    correspondent_lower = (normalized.get('correspondent') or '').lower()
-    correspondent_words = set(correspondent_lower.replace('-', ' ').replace('_', ' ').split())
+    # Get doc type and correspondent for comparison
+    doc_type_lower = (normalized.get('document_type') or '').lower().strip()
+    correspondent_lower = (normalized.get('correspondent') or '').lower().strip()
     
     for tag in tags:
         if not tag or not isinstance(tag, str):
             continue
             
-        tag_lower = tag.lower().strip()
+        tag_clean = tag.strip()
+        tag_lower = tag_clean.lower()
         
-        # Skip forbidden tags
-        if tag_lower in FORBIDDEN_TAGS:
-            logger.debug(f"Filtered forbidden tag: {tag}")
-            continue
-        
-        # Skip if tag is the document type
+        # Only skip if tag exactly matches document type or correspondent
         if tag_lower == doc_type_lower:
-            logger.debug(f"Filtered tag matching doc type: {tag}")
+            logger.debug(f"Skipped tag matching doc type: {tag}")
             continue
-        
-        # Skip if tag matches correspondent name or part of it
-        if tag_lower in correspondent_words or tag_lower == correspondent_lower:
-            logger.debug(f"Filtered tag matching correspondent: {tag}")
+        if tag_lower == correspondent_lower:
+            logger.debug(f"Skipped tag matching correspondent: {tag}")
             continue
         
         # Check for learned mapping
-        mapped = get_mapping('tag', tag)
+        mapped = get_mapping('tag', tag_clean)
         if mapped:
             normalized_tags.append(mapped)
         elif existing_tags:
-            # Fuzzy match
-            matched = fuzzy_match(tag, existing_tags)
-            normalized_tags.append(matched if matched else tag)
+            # Fuzzy match against existing tags
+            matched = fuzzy_match(tag_clean, existing_tags)
+            normalized_tags.append(matched if matched else tag_clean)
         else:
-            normalized_tags.append(tag)
+            normalized_tags.append(tag_clean)
     
     # Deduplicate while preserving order
     seen = set()

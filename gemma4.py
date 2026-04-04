@@ -41,7 +41,7 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:e4b")
 NUM_THREADS = int(os.getenv("OLLAMA_THREADS", "10"))
 FEW_SHOT_ENABLED = os.getenv("FEW_SHOT_ENABLED", "false").lower() == "true"
-INJECT_EXISTING_TAGS = os.getenv("INJECT_EXISTING_TAGS", "false").lower() == "true"
+INJECT_EXISTING_TAGS = os.getenv("INJECT_EXISTING_TAGS", "true").lower() == "true"  # Enabled by default
 
 
 def get_headers() -> Dict[str, str]:
@@ -250,82 +250,24 @@ def analyze_with_vision(image_bytes: bytes, content_type: str) -> Tuple[bool, Op
     """
     image_b64 = base64.b64encode(image_bytes).decode('utf-8')
     
-    # Conditionally get few-shot examples from learning system
-    few_shot = ""
-    if FEW_SHOT_ENABLED:
-        few_shot = build_few_shot_prompt(limit=3)
-        if few_shot:
-            few_shot = few_shot + "\n"
-            logger.debug("Few-shot examples injected into prompt")
-    
-    # Conditionally get existing Paperless tags for context
-    existing_tags_section = ""
+    # Optionally get existing Paperless tags for consistency
+    existing_tags_hint = ""
     if INJECT_EXISTING_TAGS:
         existing_tags = get_existing_tags()
         if existing_tags:
-            existing_tags_str = ", ".join(existing_tags[:50])
-            existing_tags_section = f"""
-═══════════════════════════════════════════════════════════════════
-EXISTIERENDE TAGS (exakt wiederverwenden wenn passend):
-{existing_tags_str}
-═══════════════════════════════════════════════════════════════════
-"""
-            logger.debug(f"Injected {len(existing_tags[:50])} existing tags into prompt")
+            tags_list = ", ".join(existing_tags[:30])
+            existing_tags_hint = f"\nExistierende Tags in Paperless (bei Übereinstimmung bevorzugt verwenden): {tags_list}\n"
     
-    # Build prompt - strict, focused on actual content identification
-    prompt = f"""Du bist ein Dokumentenklassifizierer für Paperless-ngx. Analysiere dieses Dokument.
+    # Simple, clear prompt - minimal steering
+    prompt = f"""Analysiere dieses Dokument für Paperless-ngx.
 
-{few_shot}AUFGABE: Bestimme Dokumenttyp, Absender und 5 beschreibende Tags.
-
-═══════════════════════════════════════════════════════════════════
-DOKUMENTTYP (immer kleingeschrieben):
-═══════════════════════════════════════════════════════════════════
-Wähle den passendsten:
-- rechnung (für Kaufbelege, Rechnungen)
-- vertrag (für Verträge, Vereinbarungen)
-- erstattung (für Rückzahlungen, Gutschriften, Auszahlungen)
-- fahrkarte (für Tickets, Bordkarten, Buchungsbestätigungen)
-- bescheid (für behördliche Mitteilungen)
-- kontoauszug (für Bankauszüge)
-- versicherung (für Policen, Beitragsrechnungen)
-- arztbrief (für medizinische Dokumente)
-- kostenvoranschlag (für Angebote, Schätzungen)
-
-═══════════════════════════════════════════════════════════════════
-TAGS - DIE WICHTIGSTE AUFGABE:
-═══════════════════════════════════════════════════════════════════
-Beantworte diese Fragen für die Tags:
-1. Was ist das HAUPTPRODUKT oder die HAUPTSACHE? (z.B. "steelcase-bürostuhl", "zigbee-adapter", "ice-ticket")
-2. Welche KATEGORIE? (z.B. "büromöbel", "smarthome", "bahnreise")
-3. Welcher KONTEXT? (z.B. "arbeit", "privat", "haushalt")
-4. Welche DETAILS sind relevant? (z.B. "verspätung", "erstattung", "abo")
-5. OPTIONAL: Zeitraum oder Route (z.B. "märz-2026", "berlin-köln")
-
-VERBOTENE WÖRTER (NIEMALS als Tag verwenden):
-❌ dienstleistung, beleg, zahlung, kosten, kunde, kauf, produkt
-❌ rechnung, vertrag, dokument (= Dokumenttyp, nicht Tag!)
-❌ Der Firmenname des Absenders
-❌ Zufällige Wörter aus dem Dokument die nicht das Hauptthema sind
-
-BEISPIELE:
-
-Steelcase Bürostuhl-Rechnung von LEiK GmbH:
-→ Typ: rechnung | Tags: ["steelcase-please", "bürostuhl", "büromöbel", "arbeit", "vorkasse"]
-
-Home Assistant Adapter von BerryBase:
-→ Typ: rechnung | Tags: ["home-assistant-zbt2", "zigbee-adapter", "smarthome", "haustechnik", "kreditkarte"]
-
-DB Verspätungs-Erstattung:
-→ Typ: erstattung | Tags: ["fahrgastrechte", "verspätung", "bahnreise", "berlin-köln", "rückerstattung"]
-
-FlixTrain Bordkarte Berlin-Köln:
-→ Typ: fahrkarte | Tags: ["flixtrain", "berlin-köln", "zugticket", "fernreise", "sitzplatz"]
-
-Claude Pro Abo-Rechnung:
-→ Typ: rechnung | Tags: ["claude-pro", "ki-assistent", "software-abo", "arbeit", "monatlich"]
-{existing_tags_section}
-Antworte NUR mit validem JSON:
-{{"dokumenttyp": "typ_kleingeschrieben", "absender": "Firmenname", "tags": ["hauptprodukt", "kategorie", "kontext", "detail", "optional"], "zusammenfassung": "Ein Satz", "konfidenz": 0.95}}"""
+Bestimme:
+1. dokumenttyp - Was für ein Dokument ist das? (kleingeschrieben, z.B. rechnung, vertrag, bescheid, fahrkarte, erstattung)
+2. absender - Wer hat dieses Dokument erstellt? (Firma/Person)
+3. tags - 5 Begriffe die den Inhalt beschreiben (NICHT den Dokumenttyp oder Absender wiederholen)
+{existing_tags_hint}
+Antworte nur mit JSON:
+{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "...", "...", "..."], "zusammenfassung": "Ein Satz"}}"""
 
     payload = {
         "model": OLLAMA_MODEL,
@@ -336,12 +278,9 @@ Antworte NUR mit validem JSON:
         }],
         "stream": False,
         "options": {
-            # Gemma 4 recommended settings
-            "temperature": 1.0,
-            "top_p": 0.95,
-            "top_k": 64,
+            "temperature": 0.7,
+            "num_ctx": 8192,
             "num_thread": NUM_THREADS
-            # No num_predict - let model finish naturally
         }
     }
     

@@ -186,68 +186,16 @@ def analyze_with_gemma4(image_bytes: bytes, content_type: str) -> Optional[Dict]
     # Encode image
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     
-    # Strict prompt focused on actual content identification
-    prompt = """Du bist ein Dokumentenklassifizierer für Paperless-ngx. Analysiere dieses Dokument.
+    # Simple, clear prompt - minimal steering
+    prompt = """Analysiere dieses Dokument für Paperless-ngx.
 
-AUFGABE: Bestimme Dokumenttyp, Absender und 5 beschreibende Tags.
+Bestimme:
+1. dokumenttyp - Was für ein Dokument ist das? (kleingeschrieben, z.B. rechnung, vertrag, bescheid, fahrkarte, erstattung)
+2. absender - Wer hat dieses Dokument erstellt? (Firma/Person)
+3. tags - 5 Begriffe die den Inhalt beschreiben (NICHT den Dokumenttyp oder Absender wiederholen)
 
-═══════════════════════════════════════════════════════════════════
-DOKUMENTTYP (immer kleingeschrieben):
-═══════════════════════════════════════════════════════════════════
-Wähle den passendsten:
-- rechnung (für Kaufbelege, Rechnungen)
-- vertrag (für Verträge, Vereinbarungen)
-- erstattung (für Rückzahlungen, Gutschriften, Auszahlungen)
-- fahrkarte (für Tickets, Bordkarten, Buchungsbestätigungen)
-- bescheid (für behördliche Mitteilungen)
-- kontoauszug (für Bankauszüge)
-- versicherung (für Policen, Beitragsrechnungen)
-- arztbrief (für medizinische Dokumente)
-- kostenvoranschlag (für Angebote, Schätzungen)
-
-═══════════════════════════════════════════════════════════════════
-TAGS - DIE WICHTIGSTE AUFGABE:
-═══════════════════════════════════════════════════════════════════
-Beantworte diese Fragen für die Tags:
-1. Was ist das HAUPTPRODUKT oder die HAUPTSACHE? (z.B. "steelcase-bürostuhl", "zigbee-adapter", "ice-ticket")
-2. Welche KATEGORIE? (z.B. "büromöbel", "smarthome", "bahnreise")
-3. Welcher KONTEXT? (z.B. "arbeit", "privat", "haushalt")
-4. Welche DETAILS sind relevant? (z.B. "verspätung", "erstattung", "abo")
-5. OPTIONAL: Zeitraum oder Route (z.B. "märz-2026", "berlin-köln")
-
-VERBOTENE WÖRTER (NIEMALS als Tag verwenden):
-❌ dienstleistung, beleg, zahlung, kosten, kunde, kauf, produkt
-❌ rechnung, vertrag, dokument (= Dokumenttyp, nicht Tag!)
-❌ Der Firmenname des Absenders
-❌ Zufällige Wörter aus dem Dokument die nicht das Hauptthema sind
-
-BEISPIELE:
-
-Steelcase Bürostuhl-Rechnung von LEiK GmbH:
-→ Typ: rechnung | Tags: ["steelcase-please", "bürostuhl", "büromöbel", "arbeit", "vorkasse"]
-
-Home Assistant Adapter von BerryBase:
-→ Typ: rechnung | Tags: ["home-assistant-zbt2", "zigbee-adapter", "smarthome", "haustechnik", "kreditkarte"]
-
-DB Verspätungs-Erstattung:
-→ Typ: erstattung | Tags: ["fahrgastrechte", "verspätung", "bahnreise", "berlin-köln", "rückerstattung"]
-
-FlixTrain Bordkarte Berlin-Köln:
-→ Typ: fahrkarte | Tags: ["flixtrain", "berlin-köln", "zugticket", "fernreise", "sitzplatz"]
-
-Claude Pro Abo-Rechnung:
-→ Typ: rechnung | Tags: ["claude-pro", "ki-assistent", "software-abo", "arbeit", "monatlich"]
-
-═══════════════════════════════════════════════════════════════════
-
-Antworte NUR mit validem JSON:
-{
-    "document_type": "typ_kleingeschrieben",
-    "correspondent": "Firmenname",
-    "tags": ["hauptprodukt", "kategorie", "kontext", "detail", "optional"],
-    "summary": "Ein Satz Zusammenfassung",
-    "confidence": 0.95
-}"""
+Antworte nur mit JSON:
+{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "...", "...", "..."], "zusammenfassung": "Ein Satz"}"""
 
     payload = {
         "model": OLLAMA_MODEL,
@@ -258,11 +206,8 @@ Antworte NUR mit validem JSON:
         }],
         "stream": False,
         "options": {
-            # Gemma 4 recommended settings from docs
-            "temperature": 1.0,
-            "top_p": 0.95,
-            "top_k": 64,
-            # No num_predict limit - let model finish naturally
+            "temperature": 0.7,
+            "num_ctx": 8192,
             "num_thread": NUM_THREADS
         }
     }
