@@ -204,6 +204,18 @@ if [[ -f "${ENV_FILE}" ]]; then
         echo "  Added: LEARNING_ENABLED=true"
     fi
     
+    # Add FEW_SHOT_ENABLED (disabled by default - can cause hallucinations)
+    if ! grep -q "^FEW_SHOT_ENABLED=" "${ENV_FILE}"; then
+        echo "FEW_SHOT_ENABLED=false" >> "${ENV_FILE}"
+        echo "  Added: FEW_SHOT_ENABLED=false (prevents hallucinations)"
+    fi
+    
+    # Add INJECT_EXISTING_TAGS (disabled by default - can cause hallucinations)
+    if ! grep -q "^INJECT_EXISTING_TAGS=" "${ENV_FILE}"; then
+        echo "INJECT_EXISTING_TAGS=false" >> "${ENV_FILE}"
+        echo "  Added: INJECT_EXISTING_TAGS=false (prevents hallucinations)"
+    fi
+    
     # Add FUZZY_MATCH_THRESHOLD
     if ! grep -q "^FUZZY_MATCH_THRESHOLD=" "${ENV_FILE}"; then
         echo "FUZZY_MATCH_THRESHOLD=0.80" >> "${ENV_FILE}"

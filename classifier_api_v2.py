@@ -53,6 +53,8 @@ def get_config():
         "AUTO_COMMIT": os.getenv("AUTO_COMMIT", "true").lower() == "true",
         "GENERATE_EXPLANATIONS": os.getenv("GENERATE_EXPLANATIONS", "false").lower() == "true",
         "LEARNING_ENABLED": os.getenv("LEARNING_ENABLED", "true").lower() == "true",
+        "FEW_SHOT_ENABLED": os.getenv("FEW_SHOT_ENABLED", "false").lower() == "true",  # Disable by default
+        "INJECT_EXISTING_TAGS": os.getenv("INJECT_EXISTING_TAGS", "false").lower() == "true",  # Disable by default
         "API_HOST": os.getenv("API_HOST", "0.0.0.0"),
         "API_PORT": int(os.getenv("API_PORT", "8001")),
     }
@@ -1503,6 +1505,8 @@ DASHBOARD_HTML = '''
                     { key: 'OLLAMA_MODEL', label: 'Model' },
                     { key: 'AUTO_COMMIT', label: 'Auto Commit', type: 'select', options: ['true', 'false'] },
                     { key: 'LEARNING_ENABLED', label: 'Learning Enabled', type: 'select', options: ['true', 'false'] },
+                    { key: 'FEW_SHOT_ENABLED', label: 'Few-Shot Examples', type: 'select', options: ['false', 'true'] },
+                    { key: 'INJECT_EXISTING_TAGS', label: 'Inject Existing Tags', type: 'select', options: ['false', 'true'] },
                 ];
                 
                 form.innerHTML = items.map(item => {
@@ -1516,7 +1520,7 @@ DASHBOARD_HTML = '''
         }
         
         async function saveConfig() {
-            const keys = ['PAPERLESS_URL', 'PAPERLESS_TOKEN', 'OLLAMA_URL', 'OLLAMA_MODEL', 'AUTO_COMMIT', 'LEARNING_ENABLED'];
+            const keys = ['PAPERLESS_URL', 'PAPERLESS_TOKEN', 'OLLAMA_URL', 'OLLAMA_MODEL', 'AUTO_COMMIT', 'LEARNING_ENABLED', 'FEW_SHOT_ENABLED', 'INJECT_EXISTING_TAGS'];
             for (const key of keys) {
                 const el = document.getElementById(`config-${key}`);
                 if (el) await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ key, value: el.value }) });
@@ -1979,6 +1983,8 @@ def generate_debug_export() -> Path:
         "ollama_threads": cfg["OLLAMA_THREADS"],
         "auto_commit": cfg["AUTO_COMMIT"],
         "learning_enabled": cfg["LEARNING_ENABLED"],
+        "few_shot_enabled": cfg.get("FEW_SHOT_ENABLED", False),
+        "inject_existing_tags": cfg.get("INJECT_EXISTING_TAGS", False),
         "max_pages": cfg["MAX_PAGES"],
     }
     

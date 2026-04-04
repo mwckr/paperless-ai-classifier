@@ -40,6 +40,8 @@ PAPERLESS_TOKEN = os.getenv("PAPERLESS_TOKEN", "")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:e4b")
 NUM_THREADS = int(os.getenv("OLLAMA_THREADS", "10"))
+FEW_SHOT_ENABLED = os.getenv("FEW_SHOT_ENABLED", "false").lower() == "true"
+INJECT_EXISTING_TAGS = os.getenv("INJECT_EXISTING_TAGS", "false").lower() == "true"
 
 
 def get_headers() -> Dict[str, str]:
@@ -248,18 +250,32 @@ def analyze_with_vision(image_bytes: bytes, content_type: str) -> Tuple[bool, Op
     """
     image_b64 = base64.b64encode(image_bytes).decode('utf-8')
     
-    # Get few-shot examples from learning system
-    few_shot = build_few_shot_prompt(limit=3)
+    # Conditionally get few-shot examples from learning system
+    few_shot = ""
+    if FEW_SHOT_ENABLED:
+        few_shot = build_few_shot_prompt(limit=3)
+        if few_shot:
+            few_shot = few_shot + "\n"
+            logger.debug("Few-shot examples injected into prompt")
     
-    # Get existing Paperless data for context
-    existing_tags = get_existing_tags()
-    existing_tags_str = ", ".join(existing_tags[:50]) if existing_tags else "keine vorhanden"
+    # Conditionally get existing Paperless tags for context
+    existing_tags_section = ""
+    if INJECT_EXISTING_TAGS:
+        existing_tags = get_existing_tags()
+        if existing_tags:
+            existing_tags_str = ", ".join(existing_tags[:50])
+            existing_tags_section = f"""
+═══════════════════════════════════════════════════════════════════
+EXISTIERENDE TAGS (exakt wiederverwenden wenn passend):
+{existing_tags_str}
+═══════════════════════════════════════════════════════════════════
+"""
+            logger.debug(f"Injected {len(existing_tags[:50])} existing tags into prompt")
     
     # Build prompt - strict, focused on actual content identification
     prompt = f"""Du bist ein Dokumentenklassifizierer für Paperless-ngx. Analysiere dieses Dokument.
 
-{few_shot}
-AUFGABE: Bestimme Dokumenttyp, Absender und 5 beschreibende Tags.
+{few_shot}AUFGABE: Bestimme Dokumenttyp, Absender und 5 beschreibende Tags.
 
 ═══════════════════════════════════════════════════════════════════
 DOKUMENTTYP (immer kleingeschrieben):
@@ -307,12 +323,7 @@ FlixTrain Bordkarte Berlin-Köln:
 
 Claude Pro Abo-Rechnung:
 → Typ: rechnung | Tags: ["claude-pro", "ki-assistent", "software-abo", "arbeit", "monatlich"]
-
-═══════════════════════════════════════════════════════════════════
-EXISTIERENDE TAGS (exakt wiederverwenden wenn passend):
-{existing_tags_str}
-═══════════════════════════════════════════════════════════════════
-
+{existing_tags_section}
 Antworte NUR mit validem JSON:
 {{"dokumenttyp": "typ_kleingeschrieben", "absender": "Firmenname", "tags": ["hauptprodukt", "kategorie", "kontext", "detail", "optional"], "zusammenfassung": "Ein Satz", "konfidenz": 0.95}}"""
 
