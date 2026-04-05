@@ -314,24 +314,23 @@ def _build_prompt() -> str:
             few_shot = "\n" + few_shot + "\n"
 
     if _config.get('GENERATE_EXPLANATIONS', False):
-        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "...", "...", "..."], "zusammenfassung": "Ein Satz", "erklärung": "..."}}'
+        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "zusammenfassung": "Ein Satz", "erklärung": "..."}}'
     else:
-        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "...", "...", "..."], "zusammenfassung": "Ein Satz"}}'
+        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "zusammenfassung": "Ein Satz"}}'
 
     prompt = f"""Analysiere dieses Dokument für die Archivierung in Paperless-ngx.
 
 Bestimme:
 1. dokumenttyp - Was für ein Dokument ist das? (kleingeschrieben)
 2. absender - Wer hat dieses Dokument erstellt/versendet?
-3. tags - Genau 5 Suchbegriffe auf Deutsch (jeweils mindestens 3 Zeichen), mit denen man dieses Dokument in einem Archiv wiederfinden würde. Stell dir vor, du gibst diese 5 Begriffe bei Google ein und dieses Dokument soll das erste Ergebnis sein.
+3. tags - 3 bis 5 präzise Suchbegriffe (jeweils mindestens 3 Zeichen), mit denen man genau dieses Dokument in einem Archiv wiederfinden würde. Qualität vor Quantität — lieber 3 gute als 5 mittelmäßige.
 
 Regeln für tags:
-- NICHT den Dokumenttyp oder Absender als Tag wiederholen
-- NICHT generische Begriffe wie "Rechnung", "Dokument", "Zahlung" verwenden
-- KONKRET sein: Produktnamen, Dienstleistungen, Zeiträume, Vertragsnummern, Beträge
-- Deutsch bevorzugen, englische Begriffe nur wenn im Deutschen üblich (z.B. "Streaming", "Cloud")
-- Beispiel für eine Spotify-Rechnung: ["Spotify Premium", "Musik Streaming", "Monatsabo", "März 2026", "Bezahlt]
-- Beispiel für einen Mietvertrag: ["Wohnung", "Kaltmiete", "Kaution", "Musterstraße 12", "2-Zimmer"]{explanation_request}
+- NIEMALS den Dokumenttyp, Absender oder deren Varianten als Tag verwenden
+- KEINE generischen Begriffe wie "Rechnung", "Dokument", "Zahlung", "MwSt", "Betrag"
+- KONKRET und SPEZIFISCH: Was unterscheidet dieses Dokument von anderen des gleichen Typs?
+- Gute Tags: Produktnamen, Dienstleistungen, Zeiträume (z.B. "März 2026"), Vertragsnummern
+- Deutsch bevorzugen, englische Begriffe nur wenn im Deutschen üblich (z.B. "Streaming", "Cloud"){explanation_request}
 {types_hint}{few_shot}
 Antworte nur mit JSON:
 {json_format}"""
