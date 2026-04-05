@@ -401,6 +401,11 @@ def normalize_result(
             logger.debug(f"Skipped tag matching correspondent: {tag}")
             continue
         
+        # Skip very short tags (likely OCR artifacts like "ki" from "km")
+        if len(tag_clean) < 3:
+            logger.debug(f"Skipped short tag ({len(tag_clean)} chars): {tag}")
+            continue
+        
         # Check for learned mapping
         mapped = get_mapping('tag', tag_clean)
         if mapped:

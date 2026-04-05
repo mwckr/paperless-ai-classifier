@@ -2,3 +2,5 @@
 *.bak
 *.md
 /__pycache__/
+*.env
+debug_20260405_224249.json
