@@ -31,7 +31,23 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKUP_DIR="${SCRIPT_DIR}/backup_v3_$(date +%Y%m%d_%H%M%S)"
+PROD_DIR="/opt/paperless-classifier"
+
+# Determine install directory: use prod dir if it exists, else script dir
+if [[ -d "${PROD_DIR}" ]]; then
+    INSTALL_DIR="${PROD_DIR}"
+else
+    INSTALL_DIR="${SCRIPT_DIR}"
+fi
+
+# If running from a different dir than prod, inform the user
+if [[ "${SCRIPT_DIR}" != "${INSTALL_DIR}" ]]; then
+    echo -e "${YELLOW}Note: Running from ${SCRIPT_DIR}${NC}"
+    echo -e "${YELLOW}      Production directory detected: ${INSTALL_DIR}${NC}"
+    echo ""
+fi
+
+BACKUP_DIR="${INSTALL_DIR}/backup_v3_$(date +%Y%m%d_%H%M%S)"
 REPO_URL="https://raw.githubusercontent.com/mwckr/paperless-ai-classifier/main"
 
 echo ""
@@ -49,10 +65,10 @@ echo ""
 
 # Detect current version
 CURRENT_VERSION="unknown"
-if [[ -f "${SCRIPT_DIR}/classifier_api_v2.py" ]] || [[ -f "${SCRIPT_DIR}/classifier_api.py" ]]; then
-    if [[ -f "${SCRIPT_DIR}/learning.py" ]] && [[ -f "${SCRIPT_DIR}/gemma4.py" ]]; then
+if [[ -f "${INSTALL_DIR}/classifier_api_v2.py" ]] || [[ -f "${INSTALL_DIR}/classifier_api.py" ]]; then
+    if [[ -f "${INSTALL_DIR}/learning.py" ]] && [[ -f "${INSTALL_DIR}/gemma4.py" ]]; then
         CURRENT_VERSION="v2"
-    elif [[ -f "${SCRIPT_DIR}/ministral.py" ]]; then
+    elif [[ -f "${INSTALL_DIR}/ministral.py" ]]; then
         CURRENT_VERSION="v1"
     fi
 fi
@@ -77,8 +93,8 @@ echo -e "${YELLOW}[1/7] Creating backup in: ${BACKUP_DIR}${NC}"
 mkdir -p "${BACKUP_DIR}"
 
 for file in classifier_api.py classifier_api_v2.py ministral.py gemma4.py learning.py .env classifier_audit.db; do
-    if [[ -f "${SCRIPT_DIR}/${file}" ]]; then
-        cp "${SCRIPT_DIR}/${file}" "${BACKUP_DIR}/"
+    if [[ -f "${INSTALL_DIR}/${file}" ]]; then
+        cp "${INSTALL_DIR}/${file}" "${BACKUP_DIR}/"
         echo "  Backed up: ${file}"
     fi
 done
@@ -92,16 +108,16 @@ download_file() {
     local url="${REPO_URL}/${filename}"
 
     echo -n "  ${filename}... "
-    if curl -fsSL "${url}" -o "${SCRIPT_DIR}/${filename}.new" 2>/dev/null; then
-        mv "${SCRIPT_DIR}/${filename}.new" "${SCRIPT_DIR}/${filename}"
+    if curl -fsSL "${url}" -o "${INSTALL_DIR}/${filename}.new" 2>/dev/null; then
+        mv "${INSTALL_DIR}/${filename}.new" "${INSTALL_DIR}/${filename}"
         echo -e "${GREEN}OK${NC}"
         return 0
-    elif wget -qO "${SCRIPT_DIR}/${filename}.new" "${url}" 2>/dev/null; then
-        mv "${SCRIPT_DIR}/${filename}.new" "${SCRIPT_DIR}/${filename}"
+    elif wget -qO "${INSTALL_DIR}/${filename}.new" "${url}" 2>/dev/null; then
+        mv "${INSTALL_DIR}/${filename}.new" "${INSTALL_DIR}/${filename}"
         echo -e "${GREEN}OK${NC}"
         return 0
     else
-        rm -f "${SCRIPT_DIR}/${filename}.new"
+        rm -f "${INSTALL_DIR}/${filename}.new"
         echo -e "${RED}FAILED${NC}"
         return 1
     fi
@@ -123,7 +139,7 @@ done
 if [[ ${DOWNLOAD_FAILED} -eq 1 ]]; then
     echo ""
     echo -e "${RED}Some downloads failed. Restoring backup...${NC}"
-    cp "${BACKUP_DIR}"/* "${SCRIPT_DIR}/" 2>/dev/null || true
+    cp "${BACKUP_DIR}"/* "${INSTALL_DIR}/" 2>/dev/null || true
     echo "Upgrade aborted. Check network connectivity."
     exit 1
 fi
@@ -214,7 +230,7 @@ PYEOF
 echo ""
 echo -e "${BLUE}[4/7] Updating .env configuration...${NC}"
 
-ENV_FILE="${SCRIPT_DIR}/.env"
+ENV_FILE="${INSTALL_DIR}/.env"
 if [[ -f "${ENV_FILE}" ]]; then
     # Model upgrade prompt
     CURRENT_MODEL=$(grep "^OLLAMA_MODEL=" "${ENV_FILE}" 2>/dev/null | cut -d'=' -f2 || echo "")
@@ -278,8 +294,10 @@ fi
 echo ""
 echo -e "${BLUE}[6/7] Checking model availability...${NC}"
 
-OLLAMA_URL=$(grep "^OLLAMA_URL=" "${ENV_FILE}" 2>/dev/null | cut -d'=' -f2 || echo "http://localhost:11434")
-TARGET_MODEL=$(grep "^OLLAMA_MODEL=" "${ENV_FILE}" 2>/dev/null | cut -d'=' -f2 || echo "gemma4:e4b")
+OLLAMA_URL=$(grep "^OLLAMA_URL=" "${ENV_FILE}" 2>/dev/null | cut -d'=' -f2)
+OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}"
+TARGET_MODEL=$(grep "^OLLAMA_MODEL=" "${ENV_FILE}" 2>/dev/null | cut -d'=' -f2)
+TARGET_MODEL="${TARGET_MODEL:-gemma4:e4b}"
 
 echo "  Ollama URL: ${OLLAMA_URL}"
 echo "  Target model: ${TARGET_MODEL}"
@@ -298,11 +316,11 @@ echo ""
 echo -e "${BLUE}[7/7] Restarting service...${NC}"
 
 # Create logs directory
-mkdir -p "${SCRIPT_DIR}/logs"
-chmod 755 "${SCRIPT_DIR}/logs"
+mkdir -p "${INSTALL_DIR}/logs"
+chmod 755 "${INSTALL_DIR}/logs"
 
 # Set permissions
-chmod 644 "${SCRIPT_DIR}"/*.py 2>/dev/null || true
+chmod 644 "${INSTALL_DIR}"/*.py 2>/dev/null || true
 
 if systemctl is-active --quiet paperless-classifier 2>/dev/null; then
     systemctl restart paperless-classifier
@@ -315,7 +333,7 @@ if systemctl is-active --quiet paperless-classifier 2>/dev/null; then
     fi
 else
     echo -e "  ${YELLOW}No running service found — start manually:${NC}"
-    echo "    python3 ${SCRIPT_DIR}/classifier_api_v2.py"
+    echo "    python3 ${INSTALL_DIR}/classifier_api_v2.py"
 fi
 
 # ---- DONE ----
@@ -336,5 +354,5 @@ echo "Backup saved to: ${BACKUP_DIR}"
 echo "Dashboard: http://<your-ip>:8001/dashboard"
 echo ""
 echo "If something went wrong:"
-echo "  cp ${BACKUP_DIR}/* ${SCRIPT_DIR}/"
+echo "  cp ${BACKUP_DIR}/* ${INSTALL_DIR}/"
 echo "  systemctl restart paperless-classifier"
