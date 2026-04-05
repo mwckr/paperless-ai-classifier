@@ -2,8 +2,8 @@
 """
 Vision Model Integration for Paperless AI Classifier
 =====================================================
-Optimized for Google's Gemma 4 with thinking mode support.
-Supports freeform classification with post-processing normalization.
+Supports any Ollama vision model (Gemma4, Qwen3-VL, etc.).
+Freeform classification with post-processing normalization.
 
 Config is passed in from classifier_api.py - no direct .env reading.
 """
@@ -318,23 +318,24 @@ def _build_prompt() -> str:
     else:
         json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "konfidenz": 0-100, "zusammenfassung": "Ein Satz"}}'
 
-    prompt = f"""Analysiere dieses Dokument für die Archivierung in Paperless-ngx.
+    prompt = f"""Du bist ein Dokumenten-Archivar. Deine Aufgabe: Dokumente für ein digitales Archiv (Paperless-ngx) klassifizieren.
 
-Bestimme:
-1. dokumenttyp - Was für ein Dokument ist das? (kleingeschrieben)
-2. absender - Wer hat dieses Dokument erstellt/versendet?
-3. tags - 3 bis 5 thematische Schlagwörter, die beschreiben WORUM es in diesem Dokument geht. Qualität vor Quantität.
-4. konfidenz - Wie sicher bist du dir bei dieser Klassifizierung? (0-100, Ganzzahl)
+Analysiere das Bild und bestimme:
+1. dokumenttyp - Art des Dokuments, kleingeschrieben (z.B. rechnung, vertrag, bescheid, kündigung)
+2. absender - Wer hat dieses Dokument erstellt oder versendet?
+3. tags - 3 bis 5 Schlagwörter, die den konkreten Inhalt dieses Dokuments beschreiben
+4. konfidenz - Deine Sicherheit bei dieser Klassifizierung (0-100){explanation_request}
 
-Regeln für tags:
-- Tags beschreiben das THEMA, nicht was auf dem Papier steht
-- NIEMALS den Dokumenttyp oder Absender als Tag verwenden
-- KEINE Datumsangaben, Rechnungsnummern, Bestellnummern oder sonstige Nummern
-- KEINE generischen Begriffe wie "Rechnung", "Dokument", "Zahlung", "MwSt", "Betrag"
-- GUTE Tags: Produktnamen, Art der Dienstleistung, Branche, konkreter Anlass
-- Deutsch bevorzugen, englische Begriffe nur wenn im Deutschen üblich{explanation_request}
-{types_hint}{few_shot}
-Antworte nur mit JSON:
+Was macht ein gutes Tag aus?
+Ein gutes Tag hilft, dieses Dokument unter tausenden wiederzufinden. Es beantwortet: Welches Produkt? Welche Dienstleistung? Welcher Anlass? Welches Thema?
+
+Tags dürfen NICHT sein:
+- Der Dokumenttyp oder Absender (sind bereits eigene Felder)
+- Generische Begriffe (Rechnung, Dokument, Zahlung, Betrag, MwSt)
+- Nummern, Datumsangaben oder Beträge
+
+Sprache: Deutsch. Englisch nur für eingedeutschte Begriffe (Streaming, Cloud, etc.).{types_hint}{few_shot}
+Antworte ausschließlich mit validem JSON:
 {json_format}"""
 
     return prompt
@@ -388,13 +389,13 @@ def analyze_with_vision(image_bytes: bytes, content_type: str) -> Tuple[bool, Op
     image_b64 = base64.b64encode(image_bytes).decode('utf-8')
     prompt = _build_prompt()
     
-    # Sampling parameters — configurable via .env, with Gemma4-tuned defaults
+    # Sampling parameters — configurable via .env
     temperature = _config.get('OLLAMA_TEMPERATURE', 0.7)
     top_p = _config.get('OLLAMA_TOP_P', 0.95)
     top_k = _config.get('OLLAMA_TOP_K', 64)
     
     payload = {
-        "model": _config.get('OLLAMA_MODEL', 'gemma4:e4b'),
+        "model": _config.get('OLLAMA_MODEL', 'qwen3-vl:8b'),
         "messages": [{
             "role": "user",
             "content": prompt,
@@ -423,13 +424,13 @@ def analyze_with_vision(image_bytes: bytes, content_type: str) -> Tuple[bool, Op
         result = response.json()
         message = result.get("message", {})
         
-        # Gemma 4 separates thinking and content
+        # Extract response content (supports thinking models like Gemma4)
         content = message.get("content", "").strip()
         thinking = message.get("thinking", "")
         
         estimated_tokens = len(prompt.split()) + len(content.split()) + len(thinking.split())
         
-        # Use content primarily, fall back to thinking
+        # Use content primarily, fall back to thinking (for thinking-mode models)
         raw = content if content else thinking
         
         if not raw:
@@ -557,8 +558,8 @@ def update_document_in_paperless(doc_id: int, result: Dict) -> bool:
 # =============================================================================
 
 def process_document(doc_id: int, apply_learning: bool = True) -> Dict:
-    """Process a single document through Gemma 4 vision analysis"""
-    logger.info(f"Processing document {doc_id} with Gemma 4")
+    """Process a single document through vision model analysis"""
+    logger.info(f"Processing document {doc_id} with {_config.get('OLLAMA_MODEL', 'vision model')}")
     
     metadata = get_document_metadata(doc_id)
     if not metadata:
@@ -607,7 +608,7 @@ def process_document(doc_id: int, apply_learning: bool = True) -> Dict:
         "document_type": vision_result.get('document_type'),
         "correspondent": vision_result.get('correspondent'),
         "tags": vision_result.get('tags', []),
-        "confidence": vision_result.get('confidence', 0.0),
+        "confidence": min(vision_result.get('confidence', 0.0), 100.0) / 100.0,
         "summary": vision_result.get('summary', ''),
         "explanation": vision_result.get('explanation', ''),
         "raw": vision_result
