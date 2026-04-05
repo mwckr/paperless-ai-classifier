@@ -860,6 +860,7 @@ DASHBOARD_HTML = '''
             <button class="tab" onclick="showTab('training')">Training</button>
             <button class="tab" onclick="showTab('mappings')">Mappings</button>
             <button class="tab" onclick="showTab('export')">Export</button>
+            <button class="tab" onclick="showTab('logs')">Logs</button>
             <button class="tab" onclick="showTab('config')">Config</button>
         </div>
         
@@ -1084,6 +1085,43 @@ DASHBOARD_HTML = '''
             </div>
         </div>
         
+        <!-- LOGS TAB -->
+        <div id="tab-logs" class="tab-content">
+            <div class="card">
+                <h3>Application Logs</h3>
+                <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 15px; flex-wrap: wrap;">
+                    <select id="log-level-filter" onchange="refreshLogs()" style="background: #0f1a2e; color: #e0e0e0; border: 1px solid #1e3a5f; padding: 6px 10px; border-radius: 4px;">
+                        <option value="">All Levels</option>
+                        <option value="ERROR">Errors</option>
+                        <option value="WARNING">Warnings</option>
+                        <option value="INFO">Info</option>
+                        <option value="DEBUG">Debug</option>
+                    </select>
+                    <label style="color: #888; font-size: 13px; display: flex; align-items: center; gap: 5px;">
+                        <input type="checkbox" id="log-autoscroll" checked> Auto-scroll
+                    </label>
+                    <label style="color: #888; font-size: 13px; display: flex; align-items: center; gap: 5px;">
+                        <input type="checkbox" id="log-autorefresh" checked> Auto-refresh (3s)
+                    </label>
+                    <span style="color: #555; font-size: 12px; margin-left: auto;" id="log-line-count"></span>
+                </div>
+                <div id="log-viewer" style="
+                    background: #050a12;
+                    border: 1px solid #1e3a5f;
+                    border-radius: 6px;
+                    padding: 12px;
+                    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+                    font-size: 12px;
+                    line-height: 1.5;
+                    max-height: 600px;
+                    overflow-y: auto;
+                    white-space: pre-wrap;
+                    word-break: break-all;
+                    color: #b0b0b0;
+                ">Loading logs...</div>
+            </div>
+        </div>
+        
         <div class="refresh-info">
             Auto-refresh every 5 seconds | Last update: <span id="last-update">--</span>
         </div>
@@ -1192,6 +1230,7 @@ DASHBOARD_HTML = '''
             if (tabName === 'training') refreshTraining();
             if (tabName === 'mappings') refreshMappings();
             if (tabName === 'export') refreshExports();
+            if (tabName === 'logs') refreshLogs();
         }
         
         function closeModal() {
@@ -1656,6 +1695,55 @@ DASHBOARD_HTML = '''
             refreshStatus();
             refreshAuditLog();
             document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+        }
+        
+        // Log viewer
+        let logRefreshTimer = null;
+        
+        function colorizeLogLine(line) {
+            if (line.includes('| ERROR |')) return `<span style="color:#ff4444">${escapeHtml(line)}</span>`;
+            if (line.includes('| WARNING |')) return `<span style="color:#ffaa00">${escapeHtml(line)}</span>`;
+            if (line.includes('| DEBUG |')) return `<span style="color:#666">${escapeHtml(line)}</span>`;
+            // INFO — highlight key events
+            if (line.includes('committed to Paperless') || line.includes('Vision success'))
+                return `<span style="color:#00cc88">${escapeHtml(line)}</span>`;
+            if (line.includes('Processing document'))
+                return `<span style="color:#00d4ff">${escapeHtml(line)}</span>`;
+            return escapeHtml(line);
+        }
+        
+        function escapeHtml(text) {
+            const d = document.createElement('div');
+            d.textContent = text;
+            return d.innerHTML;
+        }
+        
+        async function refreshLogs() {
+            const viewer = document.getElementById('log-viewer');
+            const level = document.getElementById('log-level-filter').value;
+            const counter = document.getElementById('log-line-count');
+            try {
+                let url = '/api/logs?lines=300';
+                if (level) url += '&level=' + level;
+                const resp = await fetch(url);
+                const data = await resp.json();
+                
+                viewer.innerHTML = data.lines.map(colorizeLogLine).join('\\n');
+                counter.textContent = data.lines.length + ' lines' + (data.total > data.lines.length ? ' (of ' + data.total + ' total)' : '');
+                
+                if (document.getElementById('log-autoscroll').checked) {
+                    viewer.scrollTop = viewer.scrollHeight;
+                }
+            } catch (e) {
+                viewer.textContent = 'Failed to load logs: ' + e.message;
+            }
+            
+            // Manage auto-refresh timer
+            clearInterval(logRefreshTimer);
+            if (document.getElementById('log-autorefresh').checked && 
+                document.getElementById('tab-logs').classList.contains('active')) {
+                logRefreshTimer = setInterval(refreshLogs, 3000);
+            }
         }
         
         refreshAll();
@@ -2166,6 +2254,31 @@ async def delete_export(filename: str):
         raise HTTPException(status_code=404, detail="File not found")
     file_path.unlink()
     return {"status": "deleted", "filename": filename}
+
+
+# Log viewer
+@app.get("/api/logs")
+async def get_logs(lines: int = 200, level: str = None):
+    """Get recent application log lines. Optional level filter: INFO, WARNING, ERROR, DEBUG"""
+    log_path = Path(__file__).parent / "classifier_api.log"
+    if not log_path.exists():
+        return {"lines": [], "total": 0}
+    
+    try:
+        content = await asyncio.to_thread(log_path.read_text, encoding="utf-8", errors="replace")
+        all_lines = content.splitlines()
+        
+        # Filter by level if requested
+        if level:
+            level_upper = level.upper()
+            all_lines = [l for l in all_lines if f"| {level_upper} |" in l]
+        
+        # Return last N lines
+        recent = all_lines[-min(lines, 1000):]
+        return {"lines": recent, "total": len(all_lines)}
+    except Exception as e:
+        logger.error(f"Failed to read logs: {e}")
+        raise HTTPException(status_code=500, detail="Failed to read log file")
 
 
 # Webhooks
