@@ -16,8 +16,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/opt/paperless-classifier"
 
 # Check required files exist
-if [ ! -f "$SCRIPT_DIR/ministral.py" ] || [ ! -f "$SCRIPT_DIR/classifier_api.py" ]; then
-    echo "Error: ministral.py and classifier_api.py must be in the same directory as install.sh"
+if [ ! -f "$SCRIPT_DIR/gemma4.py" ] || [ ! -f "$SCRIPT_DIR/classifier_api_v2.py" ] || [ ! -f "$SCRIPT_DIR/learning.py" ]; then
+    echo "Error: gemma4.py, learning.py, and classifier_api_v2.py must be in the same directory as install.sh"
     exit 1
 fi
 
@@ -35,8 +35,8 @@ fi
 read -p "Ollama URL [http://localhost:11434]: " OLLAMA_URL
 OLLAMA_URL=${OLLAMA_URL:-http://localhost:11434}
 
-read -p "Ollama Model [ministral-3:14b]: " OLLAMA_MODEL
-OLLAMA_MODEL=${OLLAMA_MODEL:-ministral-3:14b}
+read -p "Ollama Model [gemma4:e4b]: " OLLAMA_MODEL
+OLLAMA_MODEL=${OLLAMA_MODEL:-gemma4:e4b}
 
 read -p "Ollama Threads [10]: " OLLAMA_THREADS
 OLLAMA_THREADS=${OLLAMA_THREADS:-10}
@@ -68,16 +68,9 @@ echo "[3/6] Creating installation directory..."
 mkdir -p "$INSTALL_DIR"
 
 echo "[4/6] Copying and configuring application files..."
-cp "$SCRIPT_DIR/ministral.py" "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/classifier_api.py" "$INSTALL_DIR/"
-
-# Update paths in classifier_api.py
-sed -i 's|ENV_FILE = Path("/root/.env")|ENV_FILE = Path("'"$INSTALL_DIR"'/.env")|g' "$INSTALL_DIR/classifier_api.py"
-sed -i 's|DB_PATH = Path("/root/classifier_audit.db")|DB_PATH = Path("'"$INSTALL_DIR"'/classifier_audit.db")|g' "$INSTALL_DIR/classifier_api.py"
-sed -i "s|sys.path.insert(0, '/root')|sys.path.insert(0, '$INSTALL_DIR')|g" "$INSTALL_DIR/classifier_api.py"
-
-# Update log file path in ministral.py
-sed -i "s|FileHandler('ministral_vision.log')|FileHandler('$INSTALL_DIR/ministral_vision.log')|g" "$INSTALL_DIR/ministral.py"
+cp "$SCRIPT_DIR/gemma4.py" "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/learning.py" "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/classifier_api_v2.py" "$INSTALL_DIR/"
 
 echo "[5/6] Creating configuration..."
 cat > "$INSTALL_DIR/.env" << ENVEOF
@@ -89,11 +82,20 @@ PAPERLESS_TOKEN=$PAPERLESS_TOKEN
 OLLAMA_URL=$OLLAMA_URL
 OLLAMA_MODEL=$OLLAMA_MODEL
 OLLAMA_THREADS=$OLLAMA_THREADS
+OLLAMA_TEMPERATURE=0.7
+OLLAMA_TOP_P=0.95
+OLLAMA_TOP_K=64
 
 # Processing Options
 MAX_PAGES=$MAX_PAGES
 AUTO_COMMIT=$AUTO_COMMIT
 GENERATE_EXPLANATIONS=false
+
+# Learning & Normalization
+LEARNING_ENABLED=true
+FEW_SHOT_ENABLED=false
+INJECT_EXISTING_TYPES=true
+FUZZY_MATCH_THRESHOLD=0.80
 
 # Polling (set to 0 to disable and use webhooks instead)
 POLL_INTERVAL=$POLL_INTERVAL
@@ -114,7 +116,7 @@ Type=simple
 User=root
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$INSTALL_DIR/.env
-ExecStart=/usr/bin/python3 $INSTALL_DIR/classifier_api.py
+ExecStart=/usr/bin/python3 $INSTALL_DIR/classifier_api_v2.py
 Restart=always
 RestartSec=10
 

@@ -49,12 +49,16 @@ def get_config():
         "OLLAMA_URL": os.getenv("OLLAMA_URL", "http://localhost:11434"),
         "OLLAMA_MODEL": os.getenv("OLLAMA_MODEL", "gemma4:e4b"),
         "OLLAMA_THREADS": int(os.getenv("OLLAMA_THREADS", "10")),
+        "OLLAMA_TEMPERATURE": float(os.getenv("OLLAMA_TEMPERATURE", "0.7")),
+        "OLLAMA_TOP_P": float(os.getenv("OLLAMA_TOP_P", "0.95")),
+        "OLLAMA_TOP_K": int(os.getenv("OLLAMA_TOP_K", "64")),
         "MAX_PAGES": int(os.getenv("MAX_PAGES", "3")),
         "AUTO_COMMIT": os.getenv("AUTO_COMMIT", "true").lower() == "true",
         "GENERATE_EXPLANATIONS": os.getenv("GENERATE_EXPLANATIONS", "false").lower() == "true",
         "LEARNING_ENABLED": os.getenv("LEARNING_ENABLED", "true").lower() == "true",
         "FEW_SHOT_ENABLED": os.getenv("FEW_SHOT_ENABLED", "false").lower() == "true",
-        "INJECT_EXISTING_TAGS": os.getenv("INJECT_EXISTING_TAGS", "true").lower() == "true",  # Simple hint to reuse tags
+        "INJECT_EXISTING_TYPES": os.getenv("INJECT_EXISTING_TYPES", "true").lower() == "true",
+        "FUZZY_MATCH_THRESHOLD": float(os.getenv("FUZZY_MATCH_THRESHOLD", "0.80")),
         "API_HOST": os.getenv("API_HOST", "0.0.0.0"),
         "API_PORT": int(os.getenv("API_PORT", "8001")),
     }
@@ -237,12 +241,18 @@ def get_audit_stats() -> Dict:
         "verified_examples": verified
     }
 
+from logging.handlers import RotatingFileHandler
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
     handlers=[
-        logging.FileHandler(Path(__file__).parent / 'classifier_api.log'),
+        RotatingFileHandler(
+            Path(__file__).parent / 'classifier_api.log',
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=3
+        ),
         logging.StreamHandler()
     ]
 )
@@ -250,6 +260,7 @@ logger = logging.getLogger(__name__)
 
 # Queue for document processing
 document_queue: asyncio.Queue = None
+_pending_set: set = set()  # O(1) dedup lookup
 queue_status: Dict = {
     "processing": False,
     "current_doc": None,
@@ -259,7 +270,6 @@ queue_status: Dict = {
     "processed_count": 0,
     "last_processed": None,
     "service_started": None,
-    "pending_docs": []
 }
 
 # Polling configuration
@@ -287,31 +297,12 @@ class MappingCreate(BaseModel):
 
 # Import and configure model module
 def setup_model():
-    """Import and configure the appropriate model module (Gemma 4 or Ministral)"""
+    """Import and configure the vision model module"""
     import sys
     sys.path.insert(0, str(Path(__file__).parent))
     cfg = get_config()
-    model_name = cfg["OLLAMA_MODEL"].lower()
-    
-    # Try Gemma 4 first if model name suggests it
-    if "gemma" in model_name:
-        try:
-            import gemma4 as model_module
-            logger.info("Using Gemma 4 model module")
-        except ImportError:
-            import ministral as model_module
-            logger.info("Gemma 4 module not found, using Ministral")
-    else:
-        import ministral as model_module
-        logger.info("Using Ministral model module")
-    
-    # Configure module
-    model_module.PAPERLESS_URL = cfg["PAPERLESS_URL"]
-    model_module.PAPERLESS_TOKEN = cfg["PAPERLESS_TOKEN"]
-    model_module.OLLAMA_URL = cfg["OLLAMA_URL"]
-    model_module.OLLAMA_MODEL = cfg["OLLAMA_MODEL"]
-    model_module.NUM_THREADS = cfg["OLLAMA_THREADS"]
-    
+    import gemma4 as model_module
+    model_module.init_config(cfg)
     return model_module
 
 # Learning functions
@@ -518,7 +509,7 @@ def sync_correction_to_paperless(doc_id: int, corrections: Dict) -> bool:
 
 
 def get_paperless_document(doc_id: int) -> Optional[Dict]:
-    """Fetch current document data from Paperless"""
+    """Fetch current document data from Paperless with resolved names"""
     cfg = get_config()
     headers = {"Authorization": f"Token {cfg['PAPERLESS_TOKEN']}"}
     
@@ -537,26 +528,27 @@ def get_paperless_document(doc_id: int) -> Optional[Dict]:
             'tags': []
         }
         
-        # Fetch document type name
+        # Resolve names using bulk endpoints (avoid N+1)
         if doc.get('document_type'):
             resp = requests.get(f"{cfg['PAPERLESS_URL']}/api/document_types/{doc['document_type']}/",
                               headers=headers, timeout=10)
             if resp.status_code == 200:
                 result['document_type'] = resp.json().get('name')
         
-        # Fetch correspondent name
         if doc.get('correspondent'):
             resp = requests.get(f"{cfg['PAPERLESS_URL']}/api/correspondents/{doc['correspondent']}/",
                               headers=headers, timeout=10)
             if resp.status_code == 200:
                 result['correspondent'] = resp.json().get('name')
         
-        # Fetch tag names
-        for tag_id in doc.get('tags', []):
-            resp = requests.get(f"{cfg['PAPERLESS_URL']}/api/tags/{tag_id}/",
-                              headers=headers, timeout=10)
+        # Fetch all tags in one call and filter
+        tag_ids = doc.get('tags', [])
+        if tag_ids:
+            resp = requests.get(f"{cfg['PAPERLESS_URL']}/api/tags/",
+                              headers=headers, params={"page_size": 500}, timeout=10)
             if resp.status_code == 200:
-                result['tags'].append(resp.json().get('name'))
+                all_tags = {t['id']: t['name'] for t in resp.json().get('results', [])}
+                result['tags'] = [all_tags[tid] for tid in tag_ids if tid in all_tags]
         
         return result
         
@@ -580,7 +572,8 @@ async def poll_for_new_documents():
     try:
         cfg = get_config()
         headers = {"Authorization": f"Token {cfg['PAPERLESS_TOKEN']}"}
-        resp = requests.get(
+        resp = await asyncio.to_thread(
+            requests.get,
             f"{cfg['PAPERLESS_URL']}/api/documents/",
             headers=headers,
             params={"ordering": "-id", "page_size": 1},
@@ -600,7 +593,8 @@ async def poll_for_new_documents():
             cfg = get_config()
             headers = {"Authorization": f"Token {cfg['PAPERLESS_TOKEN']}"}
             
-            resp = requests.get(
+            resp = await asyncio.to_thread(
+                requests.get,
                 f"{cfg['PAPERLESS_URL']}/api/documents/",
                 headers=headers,
                 params={"ordering": "-id", "page_size": 10},
@@ -614,9 +608,13 @@ async def poll_for_new_documents():
                 if new_docs:
                     logger.info(f"Found {len(new_docs)} new document(s)")
                     for doc in reversed(new_docs):
-                        await document_queue.put(doc["id"])
-                        queue_status["pending_docs"].append(doc["id"])
-                        logger.info(f"Queued new document {doc['id']}: {doc.get('title', 'untitled')}")
+                        doc_id = doc["id"]
+                        # Dedup: skip if already in queue
+                        if doc_id in _pending_set:
+                            continue
+                        await document_queue.put(doc_id)
+                        _pending_set.add(doc_id)
+                        logger.info(f"Queued new document {doc_id}: {doc.get('title', 'untitled')}")
                     
                     last_seen_doc_id = max(d["id"] for d in new_docs)
         
@@ -637,20 +635,24 @@ async def process_queue():
             cfg = get_config()
             model = setup_model()
             
+            # Dedup: skip if already processing or recently processed
+            if queue_status["current_doc"] == doc_id:
+                document_queue.task_done()
+                continue
+            
             queue_status["processing"] = True
             queue_status["current_doc"] = doc_id
             queue_status["started_at"] = datetime.now().isoformat()
             queue_status["queue_size"] = document_queue.qsize()
             
-            if doc_id in queue_status["pending_docs"]:
-                queue_status["pending_docs"].remove(doc_id)
+            _pending_set.discard(doc_id)
             
             # Get document title
             try:
-                meta = model.get_document_metadata(doc_id)
+                meta = await asyncio.to_thread(model.get_document_metadata, doc_id)
                 doc_title = meta.get("title", f"Document {doc_id}") if meta else f"Document {doc_id}"
                 queue_status["current_title"] = doc_title
-            except:
+            except Exception:
                 doc_title = f"Document {doc_id}"
                 queue_status["current_title"] = doc_title
             
@@ -658,29 +660,20 @@ async def process_queue():
             log_to_audit(doc_id, doc_title, status="processing")
             
             try:
-                # Run blocking AI processing in thread pool
-                loop = asyncio.get_event_loop()
-                
-                # Check if using gemma4 or ministral
-                if hasattr(model, 'process_document'):
-                    result = await loop.run_in_executor(
-                        None,
-                        lambda: model.process_document(doc_id, apply_learning=cfg["LEARNING_ENABLED"])
-                    )
-                else:
-                    result = await loop.run_in_executor(
-                        None,
-                        lambda: model.process_document(doc_id, generate_explanation=cfg["GENERATE_EXPLANATIONS"])
-                    )
+                result = await asyncio.to_thread(
+                    model.process_document, doc_id, cfg["LEARNING_ENABLED"]
+                )
                 
                 if result["success"]:
                     logger.info(f"Document {doc_id}: {result['document_type']} | {result.get('correspondent', 'n/a')}")
                     
                     committed = False
                     if cfg["AUTO_COMMIT"]:
-                        if model.update_document_in_paperless(doc_id, result):
+                        committed = await asyncio.to_thread(
+                            model.update_document_in_paperless, doc_id, result
+                        )
+                        if committed:
                             logger.info(f"Document {doc_id} committed to Paperless")
-                            committed = True
                     
                     log_to_audit(
                         document_id=doc_id,
@@ -721,6 +714,11 @@ async def process_queue():
                 queue_status["queue_size"] = document_queue.qsize()
                 document_queue.task_done()
                 
+                # Invalidate Paperless cache when queue drains
+                if document_queue.empty():
+                    model.invalidate_cache()
+                    logger.debug("Queue empty — Paperless cache invalidated")
+                
         except asyncio.CancelledError:
             logger.info("Queue processor stopped")
             break
@@ -742,7 +740,7 @@ async def lifespan(app: FastAPI):
     
     cfg = get_config()
     logger.info("=" * 60)
-    logger.info("Paperless Document Classifier API v2")
+    logger.info("Paperless Document Classifier API v3")
     logger.info("=" * 60)
     logger.info(f"Paperless: {cfg['PAPERLESS_URL']}")
     logger.info(f"Ollama: {cfg['OLLAMA_URL']} ({cfg['OLLAMA_MODEL']})")
@@ -767,7 +765,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Paperless Document Classifier",
     description="AI-powered document classification with learning for Paperless-ngx",
-    version="2.0.0",
+    version="3.0.0",
     lifespan=lifespan
 )
 
@@ -854,7 +852,7 @@ DASHBOARD_HTML = '''
     <div class="container">
         <h1>
             <svg width="32" height="32" viewBox="0 0 24 24" fill="#00d4ff"><path d="M14,2H6A2,2 0 0,0 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2M18,20H6V4H13V9H18V20Z"/></svg>
-            Paperless Classifier v2
+            Paperless Classifier v3
         </h1>
         
         <div class="tabs">
@@ -1503,10 +1501,16 @@ DASHBOARD_HTML = '''
                     { key: 'PAPERLESS_TOKEN', label: 'Paperless Token', type: 'password' },
                     { key: 'OLLAMA_URL', label: 'Ollama URL' },
                     { key: 'OLLAMA_MODEL', label: 'Model' },
+                    { key: 'OLLAMA_TEMPERATURE', label: 'Temperature' },
+                    { key: 'OLLAMA_TOP_P', label: 'Top P' },
+                    { key: 'OLLAMA_TOP_K', label: 'Top K' },
+                    { key: 'MAX_PAGES', label: 'Max Pages' },
                     { key: 'AUTO_COMMIT', label: 'Auto Commit', type: 'select', options: ['true', 'false'] },
                     { key: 'LEARNING_ENABLED', label: 'Learning Enabled', type: 'select', options: ['true', 'false'] },
                     { key: 'FEW_SHOT_ENABLED', label: 'Few-Shot Examples', type: 'select', options: ['false', 'true'] },
-                    { key: 'INJECT_EXISTING_TAGS', label: 'Inject Existing Tags', type: 'select', options: ['false', 'true'] },
+                    { key: 'INJECT_EXISTING_TYPES', label: 'Inject Doc Types', type: 'select', options: ['true', 'false'] },
+                    { key: 'FUZZY_MATCH_THRESHOLD', label: 'Fuzzy Match Threshold' },
+                    { key: 'GENERATE_EXPLANATIONS', label: 'Generate Explanations', type: 'select', options: ['false', 'true'] },
                 ];
                 
                 form.innerHTML = items.map(item => {
@@ -1520,7 +1524,7 @@ DASHBOARD_HTML = '''
         }
         
         async function saveConfig() {
-            const keys = ['PAPERLESS_URL', 'PAPERLESS_TOKEN', 'OLLAMA_URL', 'OLLAMA_MODEL', 'AUTO_COMMIT', 'LEARNING_ENABLED', 'FEW_SHOT_ENABLED', 'INJECT_EXISTING_TAGS'];
+            const keys = ['PAPERLESS_URL', 'PAPERLESS_TOKEN', 'OLLAMA_URL', 'OLLAMA_MODEL', 'OLLAMA_TEMPERATURE', 'OLLAMA_TOP_P', 'OLLAMA_TOP_K', 'MAX_PAGES', 'AUTO_COMMIT', 'LEARNING_ENABLED', 'FEW_SHOT_ENABLED', 'INJECT_EXISTING_TYPES', 'FUZZY_MATCH_THRESHOLD', 'GENERATE_EXPLANATIONS'];
             for (const key of keys) {
                 const el = document.getElementById(`config-${key}`);
                 if (el) await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ key, value: el.value }) });
@@ -1672,14 +1676,20 @@ async def health():
     cfg = get_config()
     status = {"api": "healthy", "paperless": "unknown", "ollama": "unknown"}
     try:
-        resp = requests.get(f"{cfg['PAPERLESS_URL']}/api/documents/", timeout=5)
+        resp = await asyncio.to_thread(
+            requests.get, f"{cfg['PAPERLESS_URL']}/api/documents/",
+            headers={"Authorization": f"Token {cfg['PAPERLESS_TOKEN']}"},
+            timeout=5
+        )
         status["paperless"] = "healthy" if resp.status_code == 200 else "unhealthy"
-    except:
+    except Exception:
         status["paperless"] = "unreachable"
     try:
-        resp = requests.get(f"{cfg['OLLAMA_URL']}/api/tags", timeout=5)
+        resp = await asyncio.to_thread(
+            requests.get, f"{cfg['OLLAMA_URL']}/api/tags", timeout=5
+        )
         status["ollama"] = "healthy" if resp.status_code == 200 else "unhealthy"
-    except:
+    except Exception:
         status["ollama"] = "unreachable"
     return status
 
@@ -1691,7 +1701,7 @@ async def get_queue():
         "current_title": queue_status["current_title"],
         "started_at": queue_status["started_at"],
         "queue_size": document_queue.qsize() if document_queue else 0,
-        "pending": queue_status["pending_docs"]
+        "pending": sorted(_pending_set)
     }
 
 @app.get("/api/stats")
@@ -1709,25 +1719,45 @@ async def get_audit(limit: int = 100, offset: int = 0):
 
 @app.get("/api/config")
 async def get_config_api():
-    return get_config()
+    cfg = get_config()
+    # Redact sensitive values
+    safe = dict(cfg)
+    if safe.get("PAPERLESS_TOKEN"):
+        safe["PAPERLESS_TOKEN"] = "***REDACTED***"
+    return safe
+
+_ALLOWED_CONFIG_KEYS = {
+    "PAPERLESS_URL", "PAPERLESS_TOKEN", "OLLAMA_URL", "OLLAMA_MODEL",
+    "OLLAMA_THREADS", "OLLAMA_TEMPERATURE", "OLLAMA_TOP_P", "OLLAMA_TOP_K",
+    "MAX_PAGES", "AUTO_COMMIT", "GENERATE_EXPLANATIONS", "LEARNING_ENABLED",
+    "FEW_SHOT_ENABLED", "INJECT_EXISTING_TYPES", "FUZZY_MATCH_THRESHOLD",
+    "API_HOST", "API_PORT", "POLL_INTERVAL",
+}
 
 @app.post("/api/config")
 async def update_config(update: ConfigUpdate):
+    if update.key not in _ALLOWED_CONFIG_KEYS:
+        raise HTTPException(status_code=400, detail=f"Unknown config key: {update.key}")
     set_key(str(ENV_FILE), update.key, update.value)
     return {"status": "updated", "key": update.key}
 
 @app.post("/api/classify")
 async def classify_document(request: ClassifyRequest):
+    if request.document_id in _pending_set:
+        return {"status": "already_queued", "document_id": request.document_id}
     await document_queue.put(request.document_id)
-    queue_status["pending_docs"].append(request.document_id)
+    _pending_set.add(request.document_id)
     return {"status": "queued", "document_id": request.document_id}
 
 @app.post("/api/classify/batch")
 async def classify_batch(document_ids: List[int]):
+    queued = 0
     for doc_id in document_ids:
-        await document_queue.put(doc_id)
-        queue_status["pending_docs"].append(doc_id)
-    return {"status": "queued", "count": len(document_ids)}
+        if doc_id not in _pending_set:
+            await document_queue.put(doc_id)
+            _pending_set.add(doc_id)
+            queued += 1
+    return {"status": "queued", "count": queued, "skipped": len(document_ids) - queued}
 
 @app.delete("/api/queue/clear")
 async def clear_queue():
@@ -1739,7 +1769,7 @@ async def clear_queue():
             cleared += 1
         except asyncio.QueueEmpty:
             break
-    queue_status["pending_docs"] = []
+    _pending_set.clear()
     return {"status": "cleared", "removed": cleared}
 
 @app.delete("/api/audit/{entry_id}")
@@ -1750,10 +1780,16 @@ async def delete_audit_entry(entry_id: int):
     deleted = c.rowcount
     conn.commit()
     conn.close()
-    return {"status": "deleted" if deleted else "not_found"}
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Audit entry not found")
+    return {"status": "deleted"}
+
+_VALID_STATUSES = {"pending", "processing", "completed", "failed", "abandoned"}
 
 @app.delete("/api/audit/status/{status}")
 async def delete_audit_by_status(status: str):
+    if status not in _VALID_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {', '.join(_VALID_STATUSES)}")
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("DELETE FROM audit_log WHERE status = ?", (status,))
@@ -1796,7 +1832,7 @@ async def create_mapping(mapping: MappingCreate):
         conn.commit()
         return {"status": "created"}
     except sqlite3.IntegrityError:
-        return {"status": "exists"}
+        raise HTTPException(status_code=409, detail="Mapping already exists")
     finally:
         conn.close()
 
@@ -1808,7 +1844,9 @@ async def delete_mapping(mapping_id: int):
     deleted = c.rowcount
     conn.commit()
     conn.close()
-    return {"status": "deleted" if deleted else "not_found"}
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    return {"status": "deleted"}
 
 
 @app.delete("/api/learn/examples")
@@ -1921,7 +1959,7 @@ async def get_paperless_doc(doc_id: int):
 async def reanalyze_document(doc_id: int):
     """Re-queue a document for analysis"""
     await document_queue.put(doc_id)
-    queue_status["pending_docs"].append(doc_id)
+    _pending_set.add(doc_id)
     logger.info(f"Document {doc_id} queued for re-analysis")
     return {"status": "queued", "document_id": doc_id}
 
@@ -1981,10 +2019,15 @@ def generate_debug_export() -> Path:
         "ollama_url": cfg["OLLAMA_URL"],
         "ollama_model": cfg["OLLAMA_MODEL"],
         "ollama_threads": cfg["OLLAMA_THREADS"],
+        "ollama_temperature": cfg.get("OLLAMA_TEMPERATURE", 0.7),
+        "ollama_top_p": cfg.get("OLLAMA_TOP_P", 0.95),
+        "ollama_top_k": cfg.get("OLLAMA_TOP_K", 64),
         "auto_commit": cfg["AUTO_COMMIT"],
         "learning_enabled": cfg["LEARNING_ENABLED"],
         "few_shot_enabled": cfg.get("FEW_SHOT_ENABLED", False),
-        "inject_existing_tags": cfg.get("INJECT_EXISTING_TAGS", False),
+        "inject_existing_types": cfg.get("INJECT_EXISTING_TYPES", True),
+        "fuzzy_match_threshold": cfg.get("FUZZY_MATCH_THRESHOLD", 0.80),
+        "generate_explanations": cfg.get("GENERATE_EXPLANATIONS", False),
         "max_pages": cfg["MAX_PAGES"],
     }
     
@@ -2053,7 +2096,7 @@ def generate_debug_export() -> Path:
     export_data = {
         "export_info": {
             "generated_at": datetime.now().isoformat(),
-            "version": "2.0.0",
+            "version": "3.0.0",
             "export_type": "debug"
         },
         "system": system_info,
@@ -2078,7 +2121,7 @@ def generate_debug_export() -> Path:
 async def export_debug_logs():
     """Generate and return a debug export file"""
     try:
-        export_file = generate_debug_export()
+        export_file = await asyncio.to_thread(generate_debug_export)
         return FileResponse(
             path=export_file,
             filename=export_file.name,
@@ -2105,36 +2148,33 @@ async def list_exports():
 @app.get("/api/export/download/{filename}")
 async def download_export(filename: str):
     """Download a specific export file"""
-    # Sanitize filename
-    if ".." in filename or "/" in filename:
+    file_path = (LOGS_DIR / filename).resolve()
+    if not file_path.is_relative_to(LOGS_DIR.resolve()):
         raise HTTPException(status_code=400, detail="Invalid filename")
-    
-    file_path = LOGS_DIR / filename
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    
-    return FileResponse(path=file_path, filename=filename, media_type="application/json")
+    return FileResponse(path=file_path, filename=file_path.name, media_type="application/json")
 
 
 @app.delete("/api/export/{filename}")
 async def delete_export(filename: str):
     """Delete an export file"""
-    if ".." in filename or "/" in filename:
+    file_path = (LOGS_DIR / filename).resolve()
+    if not file_path.is_relative_to(LOGS_DIR.resolve()):
         raise HTTPException(status_code=400, detail="Invalid filename")
-    
-    file_path = LOGS_DIR / filename
-    if file_path.exists():
-        file_path.unlink()
-        return {"status": "deleted", "filename": filename}
-    return {"status": "not_found"}
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    file_path.unlink()
+    return {"status": "deleted", "filename": filename}
 
 
 # Webhooks
 @app.post("/webhook/paperless/{doc_id}")
 async def paperless_webhook_with_id(doc_id: int):
     logger.info(f"Webhook received for document {doc_id}")
-    await document_queue.put(doc_id)
-    queue_status["pending_docs"].append(doc_id)
+    if doc_id not in _pending_set:
+        await document_queue.put(doc_id)
+        _pending_set.add(doc_id)
     return {"status": "queued", "document_id": doc_id}
 
 @app.post("/webhook/paperless")
@@ -2157,8 +2197,10 @@ async def paperless_webhook(request: Request):
         doc_id = doc if isinstance(doc, int) else doc.get("id") or doc.get("pk")
     
     if doc_id:
-        await document_queue.put(int(doc_id))
-        queue_status["pending_docs"].append(int(doc_id))
+        doc_id = int(doc_id)
+        if doc_id not in _pending_set:
+            await document_queue.put(doc_id)
+            _pending_set.add(doc_id)
         logger.info(f"Document {doc_id} queued via webhook")
         return {"status": "queued", "document_id": doc_id}
     
@@ -2166,4 +2208,4 @@ async def paperless_webhook(request: Request):
 
 if __name__ == "__main__":
     cfg = get_config()
-    uvicorn.run("classifier_api:app", host=cfg["API_HOST"], port=cfg["API_PORT"], reload=False)
+    uvicorn.run("classifier_api_v2:app", host=cfg["API_HOST"], port=cfg["API_PORT"], reload=False)

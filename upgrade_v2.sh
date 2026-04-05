@@ -216,6 +216,12 @@ if [[ -f "${ENV_FILE}" ]]; then
         echo "  Added: INJECT_EXISTING_TAGS=true"
     fi
     
+    # Add GENERATE_EXPLANATIONS (can help model think more carefully)
+    if ! grep -q "^GENERATE_EXPLANATIONS=" "${ENV_FILE}"; then
+        echo "GENERATE_EXPLANATIONS=false" >> "${ENV_FILE}"
+        echo "  Added: GENERATE_EXPLANATIONS=false"
+    fi
+    
     # Add FUZZY_MATCH_THRESHOLD
     if ! grep -q "^FUZZY_MATCH_THRESHOLD=" "${ENV_FILE}"; then
         echo "FUZZY_MATCH_THRESHOLD=0.80" >> "${ENV_FILE}"

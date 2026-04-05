@@ -315,7 +315,8 @@ def normalize_result(
     result: Dict,
     existing_tags: List[str] = None,
     existing_types: List[str] = None,
-    existing_correspondents: List[str] = None
+    existing_correspondents: List[str] = None,
+    threshold: float = None
 ) -> Dict:
     """
     Apply learned mappings and fuzzy matching to normalize AI results.
@@ -323,6 +324,8 @@ def normalize_result(
     
     Does NOT modify the original dict - returns a new one.
     """
+    if threshold is None:
+        threshold = FUZZY_MATCH_THRESHOLD
     normalized = result.copy()
     
     # 1. Document type normalization
@@ -339,7 +342,7 @@ def normalize_result(
         elif existing_types:
             # Fuzzy match against existing types (case-insensitive)
             existing_lower = [t.lower() for t in existing_types]
-            matched = fuzzy_match(doc_type_lower, existing_lower)
+            matched = fuzzy_match(doc_type_lower, existing_lower, threshold=threshold)
             if matched:
                 # Find original case from existing_types
                 for orig in existing_types:
@@ -364,7 +367,7 @@ def normalize_result(
             normalized['_corr_mapped'] = True
         elif existing_correspondents:
             # Fuzzy match
-            matched = fuzzy_match(correspondent, existing_correspondents)
+            matched = fuzzy_match(correspondent, existing_correspondents, threshold=threshold)
             if matched:
                 normalized['correspondent'] = matched
                 normalized['_corr_fuzzy'] = True
@@ -404,7 +407,7 @@ def normalize_result(
             normalized_tags.append(mapped)
         elif existing_tags:
             # Fuzzy match against existing tags
-            matched = fuzzy_match(tag_clean, existing_tags)
+            matched = fuzzy_match(tag_clean, existing_tags, threshold=threshold)
             normalized_tags.append(matched if matched else tag_clean)
         else:
             normalized_tags.append(tag_clean)

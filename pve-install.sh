@@ -203,8 +203,8 @@ var_api_disk="8"
 var_api_hostname="paperless-ai"
 
 # Model defaults
-var_model="ministral-3:14b"
-var_model_ram="16384"
+var_model="gemma4:e4b"
+var_model_ram="14336"
 
 # Network defaults
 var_bridge="vmbr0"
@@ -947,7 +947,7 @@ advanced_settings() {
   model_choice=$(whiptail --backtitle "Proxmox VE Helper Scripts" \
     --title "VISION MODEL" \
     --menu "\nSelect the AI vision model:\n" 16 70 4 \
-    "1" "ministral-3:14b (recommended) - Best quality, needs 16GB RAM" \
+    "1" "gemma4:e4b (recommended) - Best quality/speed, needs 14GB RAM" \
     "2" "llava:13b - Good quality, needs 12GB RAM" \
     "3" "llava:7b - Faster/lighter, needs 8GB RAM" \
     "4" "Custom model" \
@@ -961,9 +961,9 @@ advanced_settings() {
   
   case "$model_choice" in
     1)
-      var_model="ministral-3:14b"
-      var_model_ram="16384"
-      var_ollama_ram="16384"
+      var_model="gemma4:e4b"
+      var_model_ram="14336"
+      var_ollama_ram="14336"
       ;;
     2)
       var_model="llava:13b"
@@ -1035,7 +1035,7 @@ advanced_settings_basic() {
   local input
   
   echo -e "${BL}Vision Model:${CL}"
-  echo "  1) ministral-3:14b (default, 16GB RAM)"
+  echo "  1) gemma4:e4b (default, 14GB RAM)"
   echo "  2) llava:13b (12GB RAM)"
   echo "  3) llava:7b (8GB RAM)"
   read -rp "Select [1]: " input
@@ -1368,11 +1368,12 @@ setup_api() {
     cd /opt/paperless-classifier
     
     # Download application files
-    curl -fsSL https://raw.githubusercontent.com/mwckr/paperless-ai-classifier/main/ministral.py -o ministral.py
-    curl -fsSL https://raw.githubusercontent.com/mwckr/paperless-ai-classifier/main/classifier_api.py -o classifier_api.py
+    curl -fsSL https://raw.githubusercontent.com/mwckr/paperless-ai-classifier/main/gemma4.py -o gemma4.py
+    curl -fsSL https://raw.githubusercontent.com/mwckr/paperless-ai-classifier/main/learning.py -o learning.py
+    curl -fsSL https://raw.githubusercontent.com/mwckr/paperless-ai-classifier/main/classifier_api_v2.py -o classifier_api_v2.py
     
     # Verify downloads
-    if [[ ! -s ministral.py ]] || [[ ! -s classifier_api.py ]]; then
+    if [[ ! -s gemma4.py ]] || [[ ! -s learning.py ]] || [[ ! -s classifier_api_v2.py ]]; then
       echo "ERROR: Failed to download application files"
       exit 1
     fi
@@ -1391,7 +1392,7 @@ Type=simple
 User=root
 WorkingDirectory=/opt/paperless-classifier
 EnvironmentFile=/opt/paperless-classifier/.env
-ExecStart=/usr/bin/python3 /opt/paperless-classifier/classifier_api.py
+ExecStart=/usr/bin/python3 /opt/paperless-classifier/classifier_api_v2.py
 Restart=always
 RestartSec=10
 
@@ -1422,12 +1423,21 @@ PAPERLESS_TOKEN=${PAPERLESS_TOKEN}
 OLLAMA_URL=http://${OLLAMA_IP}:11434
 OLLAMA_MODEL=${var_model}
 OLLAMA_THREADS=10
+OLLAMA_TEMPERATURE=0.7
+OLLAMA_TOP_P=0.95
+OLLAMA_TOP_K=64
 
 # Processing Options
 MAX_PAGES=3
 AUTO_COMMIT=true
 GENERATE_EXPLANATIONS=false
 POLL_INTERVAL=60
+
+# Learning & Normalization
+LEARNING_ENABLED=true
+FEW_SHOT_ENABLED=false
+INJECT_EXISTING_TYPES=true
+FUZZY_MATCH_THRESHOLD=0.80
 
 # API Configuration
 API_HOST=0.0.0.0

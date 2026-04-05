@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-Gemma 4 Vision Integration for Paperless AI Classifier
-=======================================================
-Optimized for Google's Gemma 4 model with thinking mode support.
+Vision Model Integration for Paperless AI Classifier
+=====================================================
+Optimized for Google's Gemma 4 with thinking mode support.
+Supports freeform classification with post-processing normalization.
 
-Key differences from Ministral:
-- Handles thinking/content response split
-- Uses Gemma 4 recommended sampling parameters
-- German output for Paperless fields
-- No token limits (let model finish naturally)
+Config is passed in from classifier_api.py - no direct .env reading.
 """
 import os
 import requests
@@ -25,28 +22,51 @@ from pathlib import Path
 from PIL import Image
 import io
 
-# Import learning module
-try:
-    from learning import build_few_shot_prompt, normalize_result
-except ImportError:
-    def build_few_shot_prompt(limit=3): return ""
-    def normalize_result(result, **kwargs): return result
+from learning import build_few_shot_prompt, normalize_result
 
 logger = logging.getLogger(__name__)
 
-# Configuration from environment
-PAPERLESS_URL = os.getenv("PAPERLESS_URL", "http://localhost:8000")
-PAPERLESS_TOKEN = os.getenv("PAPERLESS_TOKEN", "")
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:e4b")
-NUM_THREADS = int(os.getenv("OLLAMA_THREADS", "10"))
-FEW_SHOT_ENABLED = os.getenv("FEW_SHOT_ENABLED", "false").lower() == "true"
-INJECT_EXISTING_TAGS = os.getenv("INJECT_EXISTING_TAGS", "true").lower() == "true"  # Enabled by default
+# Module-level config cache (set by init_config)
+_config = {}
+
+# Paperless data cache — reused while queue is non-empty, with TTL
+_paperless_cache = {
+    "tags": None,
+    "types": None,
+    "correspondents": None,
+    "fetched_at": 0.0,
+}
+_CACHE_TTL_SECONDS = 300  # 5 minutes
+
+# Pre-compiled regexes for response parsing
+_RE_CODE_BLOCK = re.compile(r"```(?:json)?\s*([\s\S]*?)```")
+_RE_TRAILING_COMMA_OBJ = re.compile(r",\s*}")
+_RE_TRAILING_COMMA_ARR = re.compile(r",\s*]")
+
+
+def init_config(config: Dict):
+    """Initialize module with config from classifier_api"""
+    global _config
+    _config = config
+    logger.debug(f"Vision config initialized: model={config.get('OLLAMA_MODEL')}")
+
+
+def invalidate_cache():
+    """Invalidate cached Paperless data (called when queue drains)"""
+    _paperless_cache["tags"] = None
+    _paperless_cache["types"] = None
+    _paperless_cache["correspondents"] = None
+    _paperless_cache["fetched_at"] = 0.0
+
+
+def _cache_expired() -> bool:
+    """Check if cache has exceeded TTL"""
+    return (time.time() - _paperless_cache["fetched_at"]) > _CACHE_TTL_SECONDS
 
 
 def get_headers() -> Dict[str, str]:
     return {
-        "Authorization": f"Token {PAPERLESS_TOKEN}",
+        "Authorization": f"Token {_config.get('PAPERLESS_TOKEN', '')}",
         "Content-Type": "application/json"
     }
 
@@ -56,10 +76,12 @@ def get_headers() -> Dict[str, str]:
 # =============================================================================
 
 def get_existing_tags() -> List[str]:
-    """Fetch all existing tags from Paperless"""
+    """Fetch all existing tags from Paperless (cached per batch with TTL)"""
+    if _paperless_cache["tags"] is not None and not _cache_expired():
+        return _paperless_cache["tags"]
     try:
         response = requests.get(
-            f"{PAPERLESS_URL}/api/tags/",
+            f"{_config.get('PAPERLESS_URL')}/api/tags/",
             headers=get_headers(),
             timeout=20,
             params={"page_size": 500}
@@ -67,6 +89,8 @@ def get_existing_tags() -> List[str]:
         response.raise_for_status()
         tags = [tag['name'] for tag in response.json().get("results", [])]
         logger.info(f"Loaded {len(tags)} existing tags")
+        _paperless_cache["tags"] = tags
+        _paperless_cache["fetched_at"] = time.time()
         return tags
     except Exception as e:
         logger.warning(f"Could not fetch existing tags: {e}")
@@ -74,10 +98,12 @@ def get_existing_tags() -> List[str]:
 
 
 def get_existing_document_types() -> List[str]:
-    """Fetch all existing document types from Paperless"""
+    """Fetch all existing document types from Paperless (cached per batch with TTL)"""
+    if _paperless_cache["types"] is not None and not _cache_expired():
+        return _paperless_cache["types"]
     try:
         response = requests.get(
-            f"{PAPERLESS_URL}/api/document_types/",
+            f"{_config.get('PAPERLESS_URL')}/api/document_types/",
             headers=get_headers(),
             timeout=20,
             params={"page_size": 500}
@@ -85,6 +111,7 @@ def get_existing_document_types() -> List[str]:
         response.raise_for_status()
         types = [t['name'] for t in response.json().get("results", [])]
         logger.info(f"Loaded {len(types)} existing document types")
+        _paperless_cache["types"] = types
         return types
     except Exception as e:
         logger.warning(f"Could not fetch document types: {e}")
@@ -92,10 +119,12 @@ def get_existing_document_types() -> List[str]:
 
 
 def get_existing_correspondents() -> List[str]:
-    """Fetch all existing correspondents from Paperless"""
+    """Fetch all existing correspondents from Paperless (cached per batch with TTL)"""
+    if _paperless_cache["correspondents"] is not None and not _cache_expired():
+        return _paperless_cache["correspondents"]
     try:
         response = requests.get(
-            f"{PAPERLESS_URL}/api/correspondents/",
+            f"{_config.get('PAPERLESS_URL')}/api/correspondents/",
             headers=get_headers(),
             timeout=20,
             params={"page_size": 500}
@@ -103,6 +132,7 @@ def get_existing_correspondents() -> List[str]:
         response.raise_for_status()
         correspondents = [c['name'] for c in response.json().get("results", [])]
         logger.info(f"Loaded {len(correspondents)} existing correspondents")
+        _paperless_cache["correspondents"] = correspondents
         return correspondents
     except Exception as e:
         logger.warning(f"Could not fetch correspondents: {e}")
@@ -113,7 +143,7 @@ def list_documents(limit: int = 20) -> List[int]:
     """List available document IDs"""
     try:
         response = requests.get(
-            f"{PAPERLESS_URL}/api/documents/",
+            f"{_config.get('PAPERLESS_URL')}/api/documents/",
             headers=get_headers(),
             timeout=20,
             params={"page_size": limit}
@@ -132,7 +162,7 @@ def get_document_metadata(doc_id: int) -> Optional[Dict]:
     """Fetch document metadata from Paperless"""
     try:
         response = requests.get(
-            f"{PAPERLESS_URL}/api/documents/{doc_id}/",
+            f"{_config.get('PAPERLESS_URL')}/api/documents/{doc_id}/",
             headers=get_headers(),
             timeout=20
         )
@@ -144,13 +174,14 @@ def get_document_metadata(doc_id: int) -> Optional[Dict]:
 
 
 def fetch_document_image(doc_id: int) -> Optional[Tuple[bytes, str, float]]:
-    """Fetch document image from Paperless"""
-    headers = {"Authorization": f"Token {PAPERLESS_TOKEN}"}
+    """Fetch document image from Paperless with multi-strategy fallback"""
+    headers = {"Authorization": f"Token {_config.get('PAPERLESS_TOKEN')}"}
+    max_pages = _config.get('MAX_PAGES', 3)
     
     # Try preview first
     try:
         response = requests.get(
-            f"{PAPERLESS_URL}/api/documents/{doc_id}/preview/",
+            f"{_config.get('PAPERLESS_URL')}/api/documents/{doc_id}/preview/",
             headers=headers,
             timeout=30
         )
@@ -164,9 +195,11 @@ def fetch_document_image(doc_id: int) -> Optional[Tuple[bytes, str, float]]:
         logger.debug(f"Preview fetch failed: {e}")
     
     # Try PDF conversion
+    pdf_path = None
+    base_path = None
     try:
         response = requests.get(
-            f"{PAPERLESS_URL}/api/documents/{doc_id}/download/",
+            f"{_config.get('PAPERLESS_URL')}/api/documents/{doc_id}/download/",
             headers=headers,
             timeout=30
         )
@@ -179,7 +212,8 @@ def fetch_document_image(doc_id: int) -> Optional[Tuple[bytes, str, float]]:
         
         base_path = tempfile.mktemp()
         result = subprocess.run(
-            ['pdftoppm', '-jpeg', '-r', '100', '-scale-to', '1024', '-l', '3', pdf_path, base_path],
+            ['pdftoppm', '-jpeg', '-r', '72', '-scale-to', '1024',
+             '-l', str(max_pages), pdf_path, base_path],
             capture_output=True,
             timeout=60
         )
@@ -188,45 +222,60 @@ def fetch_document_image(doc_id: int) -> Optional[Tuple[bytes, str, float]]:
             page_files = sorted(glob.glob(f"{base_path}-*.jpg"))
             if page_files:
                 if len(page_files) == 1:
-                    with open(page_files[0], 'rb') as f:
-                        img_bytes = f.read()
+                    img = Image.open(page_files[0])
+                    max_size = 1024
+                    if max(img.size) > max_size:
+                        ratio = max_size / max(img.size)
+                        new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                        img = img.resize(new_size, Image.LANCZOS)
+                    buffer = io.BytesIO()
+                    img.convert('RGB').save(buffer, 'JPEG', quality=85)
+                    img_bytes = buffer.getvalue()
+                    img.close()
                 else:
-                    # Combine pages vertically
                     images = [Image.open(f) for f in page_files]
-                    total_height = sum(img.height for img in images)
-                    max_width = max(img.width for img in images)
+                    total_height = sum(im.height for im in images)
+                    max_width = max(im.width for im in images)
                     combined = Image.new('RGB', (max_width, total_height))
                     y_offset = 0
-                    for img in images:
-                        combined.paste(img, (0, y_offset))
-                        y_offset += img.height
+                    for im in images:
+                        combined.paste(im, (0, y_offset))
+                        y_offset += im.height
+                    max_size = 1024
+                    if max(combined.size) > max_size:
+                        ratio = max_size / max(combined.size)
+                        new_size = (int(combined.size[0] * ratio), int(combined.size[1] * ratio))
+                        combined = combined.resize(new_size, Image.LANCZOS)
                     buffer = io.BytesIO()
                     combined.save(buffer, 'JPEG', quality=85)
                     img_bytes = buffer.getvalue()
-                    for img in images:
-                        img.close()
+                    for im in images:
+                        im.close()
                 
-                # Cleanup
+                # Cleanup page files
                 for f in page_files:
                     try:
                         os.remove(f)
-                    except:
+                    except OSError:
                         pass
-                try:
-                    os.remove(pdf_path)
-                except:
-                    pass
                 
                 size_kb = len(img_bytes) / 1024
                 logger.info(f"Converted PDF to image: {size_kb:.1f} KB ({len(page_files)} pages)")
                 return img_bytes, 'image/jpeg', size_kb
     except Exception as e:
         logger.warning(f"PDF conversion error: {e}")
+    finally:
+        # Always clean up the PDF temp file
+        if pdf_path:
+            try:
+                os.remove(pdf_path)
+            except OSError:
+                pass
     
     # Fallback to thumbnail
     try:
         response = requests.get(
-            f"{PAPERLESS_URL}/api/documents/{doc_id}/thumb/",
+            f"{_config.get('PAPERLESS_URL')}/api/documents/{doc_id}/thumb/",
             headers=headers,
             timeout=25
         )
@@ -240,37 +289,103 @@ def fetch_document_image(doc_id: int) -> Optional[Tuple[bytes, str, float]]:
 
 
 # =============================================================================
-# GEMMA 4 VISION ANALYSIS
+# VISION ANALYSIS
 # =============================================================================
 
-def analyze_with_vision(image_bytes: bytes, content_type: str) -> Tuple[bool, Optional[Dict], float, int]:
-    """
-    Analyze document with Gemma 4 vision model.
-    Returns: (success, result_dict, elapsed_seconds, estimated_tokens)
-    """
-    image_b64 = base64.b64encode(image_bytes).decode('utf-8')
-    
-    # Optionally get existing Paperless tags for consistency
-    existing_tags_hint = ""
-    if INJECT_EXISTING_TAGS:
-        existing_tags = get_existing_tags()
-        if existing_tags:
-            tags_list = ", ".join(existing_tags[:30])
-            existing_tags_hint = f"\nExistierende Tags in Paperless (bei Übereinstimmung bevorzugt verwenden): {tags_list}\n"
-    
-    # Simple, clear prompt - minimal steering
+def _build_prompt() -> str:
+    """Build the classification prompt. No tag injection — tags are normalized post-hoc."""
+    explanation_request = ""
+    if _config.get('GENERATE_EXPLANATIONS', False):
+        explanation_request = '\n4. erklärung - Kurze Begründung deiner Einordnung'
+
+    # Optionally inject existing document types (small list, low hallucination risk)
+    types_hint = ""
+    if _config.get('INJECT_EXISTING_TYPES', True):
+        existing_types = get_existing_document_types()
+        if existing_types:
+            types_list = ", ".join(existing_types[:50])
+            types_hint = f"\nExistierende Dokumenttypen in Paperless (bei Übereinstimmung bevorzugt verwenden): {types_list}\n"
+
+    # Few-shot examples from learning layer
+    few_shot = ""
+    if _config.get('FEW_SHOT_ENABLED', False):
+        few_shot = build_few_shot_prompt(limit=3)
+        if few_shot:
+            few_shot = "\n" + few_shot + "\n"
+
+    if _config.get('GENERATE_EXPLANATIONS', False):
+        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "...", "...", "..."], "zusammenfassung": "Ein Satz", "erklärung": "..."}}'
+    else:
+        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "...", "...", "..."], "zusammenfassung": "Ein Satz"}}'
+
     prompt = f"""Analysiere dieses Dokument für Paperless-ngx.
 
 Bestimme:
-1. dokumenttyp - Was für ein Dokument ist das? (kleingeschrieben, z.B. rechnung, vertrag, bescheid, fahrkarte, erstattung)
-2. absender - Wer hat dieses Dokument erstellt? (Firma/Person)
-3. tags - 5 Begriffe die den Inhalt beschreiben (NICHT den Dokumenttyp oder Absender wiederholen)
-{existing_tags_hint}
+1. dokumenttyp - Was für ein Dokument ist das? (kleingeschrieben)
+2. absender - Wer hat dieses Dokument erstellt?
+3. tags - Die absolut wichtigsten 5 Begriffe, die den Inhalt präzise und genau beschreiben, nicht absender und dokumenttyp wiederverwenden. Die Begriffe sollen das Dokument nicht umschreiben, sondern den Inhalt konkret beschreiben. Bspw. Produktnamen, Ergebnisse, Themen.{explanation_request}
+{types_hint}{few_shot}
 Antworte nur mit JSON:
-{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "...", "...", "..."], "zusammenfassung": "Ein Satz"}}"""
+{json_format}"""
 
+    return prompt
+
+
+def _parse_response(raw: str) -> Optional[Dict]:
+    """Parse JSON from model response with fallback handling."""
+    if not raw:
+        return None
+
+    # Handle markdown code blocks
+    if "```" in raw:
+        match = _RE_CODE_BLOCK.search(raw)
+        if match:
+            raw = match.group(1).strip()
+
+    # Find JSON object
+    json_start = raw.find("{")
+    json_end = raw.rfind("}") + 1
+
+    if json_start < 0 or json_end <= json_start:
+        return None
+
+    json_str = raw[json_start:json_end]
+    # Clean up common JSON issues
+    json_str = _RE_TRAILING_COMMA_OBJ.sub("}", json_str)
+    json_str = _RE_TRAILING_COMMA_ARR.sub("]", json_str)
+
+    parsed = json.loads(json_str)
+
+    # Normalize German field names to English
+    field_map = {
+        'dokumenttyp': 'document_type',
+        'absender': 'correspondent',
+        'konfidenz': 'confidence',
+        'zusammenfassung': 'summary',
+        'erklärung': 'explanation',
+    }
+    for de_key, en_key in field_map.items():
+        if de_key in parsed:
+            parsed[en_key] = parsed.pop(de_key)
+
+    return parsed
+
+
+def analyze_with_vision(image_bytes: bytes, content_type: str) -> Tuple[bool, Optional[Dict], float, int]:
+    """
+    Analyze document with vision model.
+    Returns: (success, result_dict, elapsed_seconds, estimated_tokens)
+    """
+    image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+    prompt = _build_prompt()
+    
+    # Sampling parameters — configurable via .env, with Gemma4-tuned defaults
+    temperature = _config.get('OLLAMA_TEMPERATURE', 0.7)
+    top_p = _config.get('OLLAMA_TOP_P', 0.95)
+    top_k = _config.get('OLLAMA_TOP_K', 64)
+    
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": _config.get('OLLAMA_MODEL', 'gemma4:e4b'),
         "messages": [{
             "role": "user",
             "content": prompt,
@@ -278,20 +393,22 @@ Antworte nur mit JSON:
         }],
         "stream": False,
         "options": {
-            "temperature": 0.7,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
             "num_ctx": 8192,
-            "num_thread": NUM_THREADS
+            "num_thread": _config.get('OLLAMA_THREADS', 10)
         }
     }
     
     start = time.time()
     try:
-        logger.debug(f"Gemma 4 request: image {len(image_b64)} chars")
-        response = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=600)
+        logger.debug(f"Vision request: image {len(image_b64)} chars, model {_config.get('OLLAMA_MODEL')}")
+        response = requests.post(f"{_config.get('OLLAMA_URL')}/api/chat", json=payload, timeout=600)
         elapsed = time.time() - start
         
         if response.status_code != 200:
-            logger.error(f"Gemma 4 API error {response.status_code}: {response.text[:200]}")
+            logger.error(f"Vision API error {response.status_code}: {response.text[:200]}")
             return False, None, elapsed, 0
         
         result = response.json()
@@ -301,52 +418,23 @@ Antworte nur mit JSON:
         content = message.get("content", "").strip()
         thinking = message.get("thinking", "")
         
-        # Estimate tokens
         estimated_tokens = len(prompt.split()) + len(content.split()) + len(thinking.split())
         
         # Use content primarily, fall back to thinking
         raw = content if content else thinking
         
         if not raw:
-            logger.error("Empty response from Gemma 4")
+            logger.error("Empty response from vision model")
             return False, None, elapsed, estimated_tokens
         
-        # Parse JSON
         try:
-            # Handle markdown code blocks
-            if "```" in raw:
-                match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
-                if match:
-                    raw = match.group(1).strip()
-            
-            # Find JSON object
-            json_start = raw.find("{")
-            json_end = raw.rfind("}") + 1
-            
-            if json_start >= 0 and json_end > json_start:
-                json_str = raw[json_start:json_end]
-                # Clean up common issues
-                json_str = re.sub(r",\s*}", "}", json_str)
-                json_str = re.sub(r",\s*]", "]", json_str)
-                
-                parsed = json.loads(json_str)
-                
-                # Normalize field names for compatibility
-                if 'dokumenttyp' in parsed:
-                    parsed['document_type'] = parsed.pop('dokumenttyp')
-                if 'absender' in parsed:
-                    parsed['correspondent'] = parsed.pop('absender')
-                if 'konfidenz' in parsed:
-                    parsed['confidence'] = parsed.pop('konfidenz')
-                if 'zusammenfassung' in parsed:
-                    parsed['summary'] = parsed.pop('zusammenfassung')
-                
-                logger.info(f"Gemma 4 success: {parsed.get('document_type')} | {elapsed:.1f}s | ~{estimated_tokens} tokens")
+            parsed = _parse_response(raw)
+            if parsed:
+                logger.info(f"Vision success: {parsed.get('document_type')} | {elapsed:.1f}s | ~{estimated_tokens} tokens")
                 return True, parsed, elapsed, estimated_tokens
             else:
                 logger.warning(f"No JSON found in response: {raw[:200]}")
                 return False, None, elapsed, estimated_tokens
-                
         except json.JSONDecodeError as e:
             logger.warning(f"JSON parse error: {e}")
             logger.warning(f"Raw: {raw[:300]}")
@@ -354,11 +442,11 @@ Antworte nur mit JSON:
             
     except requests.exceptions.Timeout:
         elapsed = time.time() - start
-        logger.error(f"Gemma 4 timeout after {elapsed:.1f}s")
+        logger.error(f"Vision timeout after {elapsed:.1f}s")
         return False, None, elapsed, 0
     except Exception as e:
         elapsed = time.time() - start
-        logger.error(f"Gemma 4 error: {e}")
+        logger.error(f"Vision error: {e}")
         return False, None, elapsed, 0
 
 
@@ -366,69 +454,11 @@ Antworte nur mit JSON:
 # PAPERLESS UPDATE
 # =============================================================================
 
-def get_or_create_tag(tag_name: str) -> Optional[int]:
-    """Get existing tag ID or create new tag"""
-    try:
-        # Search for existing
-        response = requests.get(
-            f"{PAPERLESS_URL}/api/tags/",
-            headers=get_headers(),
-            params={"name__iexact": tag_name},
-            timeout=10
-        )
-        if response.status_code == 200:
-            results = response.json().get("results", [])
-            if results:
-                return results[0]["id"]
-        
-        # Create new
-        response = requests.post(
-            f"{PAPERLESS_URL}/api/tags/",
-            headers=get_headers(),
-            json={"name": tag_name},
-            timeout=10
-        )
-        if response.status_code == 201:
-            return response.json()["id"]
-    except Exception as e:
-        logger.error(f"Tag error for '{tag_name}': {e}")
-    return None
-
-
-def get_or_create_document_type(type_name: str) -> Optional[int]:
-    """Get existing document type ID or create new"""
+def _get_or_create_resource(endpoint: str, name: str) -> Optional[int]:
+    """Generic get-or-create for Paperless resources (tags, document_types, correspondents)"""
     try:
         response = requests.get(
-            f"{PAPERLESS_URL}/api/document_types/",
-            headers=get_headers(),
-            params={"name__iexact": type_name},
-            timeout=10
-        )
-        if response.status_code == 200:
-            results = response.json().get("results", [])
-            if results:
-                return results[0]["id"]
-        
-        response = requests.post(
-            f"{PAPERLESS_URL}/api/document_types/",
-            headers=get_headers(),
-            json={"name": type_name},
-            timeout=10
-        )
-        if response.status_code == 201:
-            return response.json()["id"]
-    except Exception as e:
-        logger.error(f"Document type error for '{type_name}': {e}")
-    return None
-
-
-def get_or_create_correspondent(name: str) -> Optional[int]:
-    """Get existing correspondent ID or create new"""
-    if not name or name.lower() in ['keine', 'none', 'null', '']:
-        return None
-    try:
-        response = requests.get(
-            f"{PAPERLESS_URL}/api/correspondents/",
+            f"{_config.get('PAPERLESS_URL')}/api/{endpoint}/",
             headers=get_headers(),
             params={"name__iexact": name},
             timeout=10
@@ -439,7 +469,7 @@ def get_or_create_correspondent(name: str) -> Optional[int]:
                 return results[0]["id"]
         
         response = requests.post(
-            f"{PAPERLESS_URL}/api/correspondents/",
+            f"{_config.get('PAPERLESS_URL')}/api/{endpoint}/",
             headers=get_headers(),
             json={"name": name},
             timeout=10
@@ -447,8 +477,22 @@ def get_or_create_correspondent(name: str) -> Optional[int]:
         if response.status_code == 201:
             return response.json()["id"]
     except Exception as e:
-        logger.error(f"Correspondent error for '{name}': {e}")
+        logger.error(f"{endpoint} error for '{name}': {e}")
     return None
+
+
+def get_or_create_tag(tag_name: str) -> Optional[int]:
+    return _get_or_create_resource("tags", tag_name)
+
+
+def get_or_create_document_type(type_name: str) -> Optional[int]:
+    return _get_or_create_resource("document_types", type_name)
+
+
+def get_or_create_correspondent(name: str) -> Optional[int]:
+    if not name or name.lower() in ('keine', 'none', 'null', ''):
+        return None
+    return _get_or_create_resource("correspondents", name)
 
 
 def update_document_in_paperless(doc_id: int, result: Dict) -> bool:
@@ -486,7 +530,7 @@ def update_document_in_paperless(doc_id: int, result: Dict) -> bool:
             return False
         
         response = requests.patch(
-            f"{PAPERLESS_URL}/api/documents/{doc_id}/",
+            f"{_config.get('PAPERLESS_URL')}/api/documents/{doc_id}/",
             headers=get_headers(),
             json=update_data,
             timeout=15
@@ -528,17 +572,20 @@ def process_document(doc_id: int, apply_learning: bool = True) -> Dict:
             "image_size_kb": size_kb
         }
     
-    # Apply learning normalization
+    # Apply learning normalization: fuzzy-match tags/types/correspondents
+    # against existing Paperless data + learned term mappings
     if apply_learning:
         existing_tags = get_existing_tags()
         existing_types = get_existing_document_types()
         existing_correspondents = get_existing_correspondents()
         
+        threshold = _config.get('FUZZY_MATCH_THRESHOLD', 0.80)
         vision_result = normalize_result(
             vision_result,
             existing_tags=existing_tags,
             existing_types=existing_types,
-            existing_correspondents=existing_correspondents
+            existing_correspondents=existing_correspondents,
+            threshold=threshold
         )
     
     result = {
@@ -553,6 +600,7 @@ def process_document(doc_id: int, apply_learning: bool = True) -> Dict:
         "tags": vision_result.get('tags', []),
         "confidence": vision_result.get('confidence', 0.0),
         "summary": vision_result.get('summary', ''),
+        "explanation": vision_result.get('explanation', ''),
         "raw": vision_result
     }
     
