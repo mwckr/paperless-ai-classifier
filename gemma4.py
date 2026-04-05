@@ -296,7 +296,7 @@ def _build_prompt() -> str:
     """Build the classification prompt. No tag injection — tags are normalized post-hoc."""
     explanation_request = ""
     if _config.get('GENERATE_EXPLANATIONS', False):
-        explanation_request = '\n4. erklärung - Kurze Begründung deiner Einordnung'
+        explanation_request = '\n5. erklärung - Kurze Begründung deiner Einordnung'
 
     # Optionally inject existing document types (small list, low hallucination risk)
     types_hint = ""
@@ -314,23 +314,25 @@ def _build_prompt() -> str:
             few_shot = "\n" + few_shot + "\n"
 
     if _config.get('GENERATE_EXPLANATIONS', False):
-        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "zusammenfassung": "Ein Satz", "erklärung": "..."}}'
+        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "konfidenz": 0-100, "zusammenfassung": "Ein Satz", "erklärung": "..."}}'
     else:
-        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "zusammenfassung": "Ein Satz"}}'
+        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "konfidenz": 0-100, "zusammenfassung": "Ein Satz"}}'
 
     prompt = f"""Analysiere dieses Dokument für die Archivierung in Paperless-ngx.
 
 Bestimme:
 1. dokumenttyp - Was für ein Dokument ist das? (kleingeschrieben)
 2. absender - Wer hat dieses Dokument erstellt/versendet?
-3. tags - 3 bis 5 präzise Suchbegriffe (jeweils mindestens 3 Zeichen), mit denen man genau dieses Dokument in einem Archiv wiederfinden würde. Qualität vor Quantität — lieber 3 gute als 5 mittelmäßige.
+3. tags - 3 bis 5 thematische Schlagwörter, die beschreiben WORUM es in diesem Dokument geht. Qualität vor Quantität.
+4. konfidenz - Wie sicher bist du dir bei dieser Klassifizierung? (0-100, Ganzzahl)
 
 Regeln für tags:
-- NIEMALS den Dokumenttyp, Absender oder deren Varianten als Tag verwenden
+- Tags beschreiben das THEMA, nicht was auf dem Papier steht
+- NIEMALS den Dokumenttyp oder Absender als Tag verwenden
+- KEINE Datumsangaben, Rechnungsnummern, Bestellnummern oder sonstige Nummern
 - KEINE generischen Begriffe wie "Rechnung", "Dokument", "Zahlung", "MwSt", "Betrag"
-- KONKRET und SPEZIFISCH: Was unterscheidet dieses Dokument von anderen des gleichen Typs?
-- Gute Tags: Produktnamen, Dienstleistungen, Zeiträume (z.B. "März 2026"), Vertragsnummern
-- Deutsch bevorzugen, englische Begriffe nur wenn im Deutschen üblich (z.B. "Streaming", "Cloud"){explanation_request}
+- GUTE Tags: Produktnamen, Art der Dienstleistung, Branche, konkreter Anlass
+- Deutsch bevorzugen, englische Begriffe nur wenn im Deutschen üblich{explanation_request}
 {types_hint}{few_shot}
 Antworte nur mit JSON:
 {json_format}"""
