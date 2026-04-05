@@ -318,12 +318,20 @@ def _build_prompt() -> str:
     else:
         json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "...", "...", "..."], "zusammenfassung": "Ein Satz"}}'
 
-    prompt = f"""Analysiere dieses Dokument für Paperless-ngx.
+    prompt = f"""Analysiere dieses Dokument für die Archivierung in Paperless-ngx.
 
 Bestimme:
 1. dokumenttyp - Was für ein Dokument ist das? (kleingeschrieben)
-2. absender - Wer hat dieses Dokument erstellt?
-3. tags - Die absolut wichtigsten 5 Begriffe, die den Inhalt präzise und genau beschreiben, nicht absender und dokumenttyp wiederverwenden. Die Begriffe sollen das Dokument nicht umschreiben, sondern den Inhalt konkret beschreiben. Bspw. Produktnamen, Ergebnisse, Themen.{explanation_request}
+2. absender - Wer hat dieses Dokument erstellt/versendet?
+3. tags - Genau 5 Suchbegriffe auf Deutsch (jeweils mindestens 3 Zeichen), mit denen man dieses Dokument in einem Archiv wiederfinden würde. Stell dir vor, du gibst diese 5 Begriffe bei Google ein und dieses Dokument soll das erste Ergebnis sein.
+
+Regeln für tags:
+- NICHT den Dokumenttyp oder Absender als Tag wiederholen
+- NICHT generische Begriffe wie "Rechnung", "Dokument", "Zahlung" verwenden
+- KONKRET sein: Produktnamen, Dienstleistungen, Zeiträume, Vertragsnummern, Beträge
+- Deutsch bevorzugen, englische Begriffe nur wenn im Deutschen üblich (z.B. "Streaming", "Cloud")
+- Beispiel für eine Spotify-Rechnung: ["Spotify Premium", "Musik Streaming", "Monatsabo", "März 2026", "Bezahlt]
+- Beispiel für einen Mietvertrag: ["Wohnung", "Kaltmiete", "Kaution", "Musterstraße 12", "2-Zimmer"]{explanation_request}
 {types_hint}{few_shot}
 Antworte nur mit JSON:
 {json_format}"""
