@@ -1826,7 +1826,10 @@ _ALLOWED_CONFIG_KEYS = {
 async def update_config(update: ConfigUpdate):
     if update.key not in _ALLOWED_CONFIG_KEYS:
         raise HTTPException(status_code=400, detail=f"Unknown config key: {update.key}")
-    set_key(str(ENV_FILE), update.key, update.value)
+    # Never write back the redacted placeholder
+    if update.key == "PAPERLESS_TOKEN" and update.value == "***REDACTED***":
+        return {"status": "skipped", "key": update.key, "reason": "redacted value unchanged"}
+    set_key(str(ENV_FILE), update.key, update.value, quote_mode="never")
     return {"status": "updated", "key": update.key}
 
 @app.post("/api/classify")

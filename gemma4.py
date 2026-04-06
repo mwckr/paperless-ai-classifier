@@ -293,48 +293,51 @@ def fetch_document_image(doc_id: int) -> Optional[Tuple[bytes, str, float]]:
 # =============================================================================
 
 def _build_prompt() -> str:
-    """Build the classification prompt. No tag injection — tags are normalized post-hoc."""
+    """Build the classification prompt. Existing tags injected as hints for consistency."""
     explanation_request = ""
     if _config.get('GENERATE_EXPLANATIONS', False):
         explanation_request = '\n5. erklärung - Kurze Begründung deiner Einordnung'
 
-    # Optionally inject existing document types (small list, low hallucination risk)
+    # Inject existing tags as hints for reuse
+    tags_hint = ""
+    existing_tags = get_existing_tags()
+    if existing_tags:
+        tags_list = ", ".join(existing_tags[:200])
+        tags_hint = f"\nExistierende Tags in Paperless (nur bei Übereinstimmung bevorzugt verwenden): {tags_list}"
+
+    # Optionally inject existing document types
     types_hint = ""
     if _config.get('INJECT_EXISTING_TYPES', True):
         existing_types = get_existing_document_types()
         if existing_types:
             types_list = ", ".join(existing_types[:50])
-            types_hint = f"\nExistierende Dokumenttypen in Paperless (bei Übereinstimmung bevorzugt verwenden): {types_list}\n"
+            types_hint = f"\nExistierende Dokumenttypen in Paperless (bei Übereinstimmung bevorzugt verwenden): {types_list}"
 
     # Few-shot examples from learning layer
     few_shot = ""
     if _config.get('FEW_SHOT_ENABLED', False):
         few_shot = build_few_shot_prompt(limit=3)
         if few_shot:
-            few_shot = "\n" + few_shot + "\n"
+            few_shot = "\n" + few_shot
 
     if _config.get('GENERATE_EXPLANATIONS', False):
-        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "konfidenz": 0-100, "zusammenfassung": "Ein Satz", "erklärung": "..."}}'
+        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "konfidenz": 0.0-1.0, "erklärung": "..."}}'
     else:
-        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "konfidenz": 0-100, "zusammenfassung": "Ein Satz"}}'
+        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "konfidenz": 0.0-1.0}}'
 
-    prompt = f"""Du bist ein Dokumenten-Archivar. Deine Aufgabe: Dokumente für ein digitales Archiv (Paperless-ngx) klassifizieren.
-
-Analysiere das Bild und bestimme:
-1. dokumenttyp - Art des Dokuments, kleingeschrieben (z.B. rechnung, vertrag, bescheid, kündigung)
-2. absender - Wer hat dieses Dokument erstellt oder versendet?
-3. tags - 3 bis 5 Schlagwörter, die den konkreten Inhalt dieses Dokuments beschreiben
-4. konfidenz - Deine Sicherheit bei dieser Klassifizierung (0-100){explanation_request}
-
+    prompt = f"""Analysiere das Dokument und bestimme:
+1. dokumenttyp: Art des Dokuments, kleingeschrieben (z.B. rechnung, vertrag, bescheid, kündigung)
+2. absender: Wer hat dieses Dokument erstellt bzw versendet?
+3. tags: 3 bis 5 Schlagwörter, die den konkreten Inhalt dieses Dokuments beschreiben, ohne sich in kleinen, unwichtigen Details zu verlieren
+4. konfidenz - Deine Sicherheit bei dieser Klassifizierung (0-1){explanation_request}
+WICHTIG - unbedingt berücksichtigen!:
 Was macht ein gutes Tag aus?
 Ein gutes Tag hilft, dieses Dokument unter tausenden wiederzufinden. Es beantwortet: Welches Produkt? Welche Dienstleistung? Welcher Anlass? Welches Thema?
-
 Tags dürfen NICHT sein:
 - Der Dokumenttyp oder Absender (sind bereits eigene Felder)
 - Generische Begriffe (Rechnung, Dokument, Zahlung, Betrag, MwSt)
-- Nummern, Datumsangaben oder Beträge
-
-Sprache: Deutsch. Englisch nur für eingedeutschte Begriffe (Streaming, Cloud, etc.).{types_hint}{few_shot}
+- Nummern, Datumsangaben oder Beträge{tags_hint}{types_hint}
+Beachte die Sprache: Deutsch. Englisch nur für eingedeutschte Begriffe (Streaming, Cloud, etc.).{few_shot}
 Antworte ausschließlich mit validem JSON:
 {json_format}"""
 
@@ -395,7 +398,7 @@ def analyze_with_vision(image_bytes: bytes, content_type: str) -> Tuple[bool, Op
     top_k = _config.get('OLLAMA_TOP_K', 64)
     
     payload = {
-        "model": _config.get('OLLAMA_MODEL', 'qwen3-vl:8b'),
+        "model": _config.get('OLLAMA_MODEL', 'gemma3:12b'),
         "messages": [{
             "role": "user",
             "content": prompt,
@@ -608,7 +611,7 @@ def process_document(doc_id: int, apply_learning: bool = True) -> Dict:
         "document_type": vision_result.get('document_type'),
         "correspondent": vision_result.get('correspondent'),
         "tags": vision_result.get('tags', []),
-        "confidence": min(vision_result.get('confidence', 0.0), 100.0) / 100.0,
+        "confidence": min(vision_result.get('confidence', 0.0), 1.0) if vision_result.get('confidence', 0.0) <= 1.0 else min(vision_result.get('confidence', 0.0), 100.0) / 100.0,
         "summary": vision_result.get('summary', ''),
         "explanation": vision_result.get('explanation', ''),
         "raw": vision_result
