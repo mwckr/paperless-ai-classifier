@@ -323,6 +323,11 @@ def _build_prompt() -> str:
         if few_shot:
             few_shot = "\n" + few_shot
 
+    if _config.get('GENERATE_EXPLANATIONS', False):
+        json_format = '\n{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "konfidenz": 0.0-1.0, "erklärung": "..."}}'
+    else:
+        json_format = '\n{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "konfidenz": 0.0-1.0}}'
+
     prompt = f"""Analysiere das Dokument und bestimme:
 1. dokumenttyp: Art des Dokuments, kleingeschrieben (z.B. rechnung, vertrag, bescheid, kündigung)
 2. absender: Wer hat dieses Dokument erstellt bzw versendet?
@@ -336,7 +341,7 @@ Tags dürfen NICHT sein:
 - Generische Begriffe (Rechnung, Dokument, Zahlung, Betrag, MwSt)
 - Nummern, Datumsangaben oder Beträge{tags_hint}{types_hint}
 Beachte die Sprache: Deutsch. Englisch nur für eingedeutschte Begriffe (Streaming, Cloud, etc.).{few_shot}
-Antworte ausschließlich mit validem JSON."""
+Antworte ausschließlich mit validem JSON:{json_format}"""
 
     return prompt
 
