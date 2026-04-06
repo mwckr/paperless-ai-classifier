@@ -43,15 +43,12 @@ LOG_MAX_SIZE_MB = 50
 # Configuration from .env
 def get_config():
     load_dotenv(ENV_FILE, override=True)
-    return {
+    config = {
         "PAPERLESS_URL": os.getenv("PAPERLESS_URL", "http://localhost:8000"),
         "PAPERLESS_TOKEN": os.getenv("PAPERLESS_TOKEN", ""),
         "OLLAMA_URL": os.getenv("OLLAMA_URL", "http://localhost:11434"),
-        "OLLAMA_MODEL": os.getenv("OLLAMA_MODEL", "gemma4:e4b"),
+        "OLLAMA_MODEL": os.getenv("OLLAMA_MODEL", "gemma3:12b"),
         "OLLAMA_THREADS": int(os.getenv("OLLAMA_THREADS", "10")),
-        "OLLAMA_TEMPERATURE": float(os.getenv("OLLAMA_TEMPERATURE", "0.7")),
-        "OLLAMA_TOP_P": float(os.getenv("OLLAMA_TOP_P", "0.95")),
-        "OLLAMA_TOP_K": int(os.getenv("OLLAMA_TOP_K", "64")),
         "MAX_PAGES": int(os.getenv("MAX_PAGES", "3")),
         "AUTO_COMMIT": os.getenv("AUTO_COMMIT", "true").lower() == "true",
         "GENERATE_EXPLANATIONS": os.getenv("GENERATE_EXPLANATIONS", "false").lower() == "true",
@@ -63,6 +60,14 @@ def get_config():
         "API_HOST": os.getenv("API_HOST", "0.0.0.0"),
         "API_PORT": int(os.getenv("API_PORT", "8001")),
     }
+    # Only include sampling params if explicitly set — otherwise let model use its defaults
+    if os.getenv("OLLAMA_TEMPERATURE"):
+        config["OLLAMA_TEMPERATURE"] = float(os.getenv("OLLAMA_TEMPERATURE"))
+    if os.getenv("OLLAMA_TOP_P"):
+        config["OLLAMA_TOP_P"] = float(os.getenv("OLLAMA_TOP_P"))
+    if os.getenv("OLLAMA_TOP_K"):
+        config["OLLAMA_TOP_K"] = int(os.getenv("OLLAMA_TOP_K"))
+    return config
 
 # Database setup
 DB_PATH = Path(__file__).parent / "classifier_audit.db"
@@ -2112,9 +2117,9 @@ def generate_debug_export() -> Path:
         "ollama_url": cfg["OLLAMA_URL"],
         "ollama_model": cfg["OLLAMA_MODEL"],
         "ollama_threads": cfg["OLLAMA_THREADS"],
-        "ollama_temperature": cfg.get("OLLAMA_TEMPERATURE", 0.7),
-        "ollama_top_p": cfg.get("OLLAMA_TOP_P", 0.95),
-        "ollama_top_k": cfg.get("OLLAMA_TOP_K", 64),
+        "ollama_temperature": cfg.get("OLLAMA_TEMPERATURE", "model default"),
+        "ollama_top_p": cfg.get("OLLAMA_TOP_P", "model default"),
+        "ollama_top_k": cfg.get("OLLAMA_TOP_K", "model default"),
         "auto_commit": cfg["AUTO_COMMIT"],
         "learning_enabled": cfg["LEARNING_ENABLED"],
         "few_shot_enabled": cfg.get("FEW_SHOT_ENABLED", False),

@@ -323,11 +323,6 @@ def _build_prompt() -> str:
         if few_shot:
             few_shot = "\n" + few_shot
 
-    if _config.get('GENERATE_EXPLANATIONS', False):
-        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "konfidenz": 0.0-1.0, "erklärung": "..."}}'
-    else:
-        json_format = '{{"dokumenttyp": "...", "absender": "...", "tags": ["...", "...", "..."], "konfidenz": 0.0-1.0}}'
-
     prompt = f"""Analysiere das Dokument und bestimme:
 1. dokumenttyp: Art des Dokuments, kleingeschrieben (z.B. rechnung, vertrag, bescheid, kündigung)
 2. absender: Wer hat dieses Dokument erstellt bzw versendet?
@@ -341,8 +336,7 @@ Tags dürfen NICHT sein:
 - Generische Begriffe (Rechnung, Dokument, Zahlung, Betrag, MwSt)
 - Nummern, Datumsangaben oder Beträge{tags_hint}{types_hint}
 Beachte die Sprache: Deutsch. Englisch nur für eingedeutschte Begriffe (Streaming, Cloud, etc.).{few_shot}
-Antworte ausschließlich mit validem JSON:
-{json_format}"""
+Antworte ausschließlich mit validem JSON."""
 
     return prompt
 
@@ -396,10 +390,18 @@ def analyze_with_vision(page_images: List[bytes]) -> Tuple[bool, Optional[Dict],
     images_b64 = [base64.b64encode(img).decode('utf-8') for img in page_images]
     prompt = _build_prompt()
     
-    # Sampling parameters — configurable via .env
-    temperature = _config.get('OLLAMA_TEMPERATURE', 0.7)
-    top_p = _config.get('OLLAMA_TOP_P', 0.95)
-    top_k = _config.get('OLLAMA_TOP_K', 64)
+    logger.debug(f"Prompt ({len(prompt)} chars):\n{prompt}")
+    
+    # Build options — only include sampling params if explicitly configured
+    options = {}
+    if 'OLLAMA_TEMPERATURE' in _config:
+        options['temperature'] = _config['OLLAMA_TEMPERATURE']
+    if 'OLLAMA_TOP_P' in _config:
+        options['top_p'] = _config['OLLAMA_TOP_P']
+    if 'OLLAMA_TOP_K' in _config:
+        options['top_k'] = _config['OLLAMA_TOP_K']
+    if _config.get('OLLAMA_THREADS'):
+        options['num_thread'] = _config['OLLAMA_THREADS']
     
     payload = {
         "model": _config.get('OLLAMA_MODEL', 'gemma3:12b'),
@@ -409,18 +411,13 @@ def analyze_with_vision(page_images: List[bytes]) -> Tuple[bool, Optional[Dict],
             "images": images_b64
         }],
         "stream": False,
-        "options": {
-            "temperature": temperature,
-            "top_p": top_p,
-            "top_k": top_k,
-            "num_ctx": 8192,
-            "num_thread": _config.get('OLLAMA_THREADS', 10)
-        }
     }
+    if options:
+        payload["options"] = options
     
     start = time.time()
     try:
-        logger.debug(f"Vision request: {len(images_b64)} images, model {_config.get('OLLAMA_MODEL')}")
+        logger.debug(f"Vision request: {len(images_b64)} images, model {_config.get('OLLAMA_MODEL')}, options={options or 'model defaults'}")
         response = requests.post(f"{_config.get('OLLAMA_URL')}/api/chat", json=payload, timeout=600)
         elapsed = time.time() - start
         
