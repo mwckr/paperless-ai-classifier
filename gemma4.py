@@ -369,7 +369,37 @@ def _parse_response(raw: str) -> Optional[Dict]:
     json_str = _RE_TRAILING_COMMA_OBJ.sub("}", json_str)
     json_str = _RE_TRAILING_COMMA_ARR.sub("]", json_str)
 
-    parsed = json.loads(json_str)
+    # Sanitize control characters inside string values (models put newlines/tabs in explanations)
+    # Replace unescaped control chars with spaces, but preserve valid JSON escapes
+    json_str = re.sub(r'(?<=: ")(.*?)(?="[,\s}])', lambda m: m.group(0).replace('\n', ' ').replace('\r', ' ').replace('\t', ' '), json_str, flags=re.DOTALL)
+
+    try:
+        parsed = json.loads(json_str)
+    except json.JSONDecodeError:
+        # More aggressive cleanup: replace all bare control chars
+        clean = []
+        in_string = False
+        escape = False
+        for ch in json_str:
+            if escape:
+                clean.append(ch)
+                escape = False
+                continue
+            if ch == '\\':
+                escape = True
+                clean.append(ch)
+                continue
+            if ch == '"':
+                in_string = not in_string
+            if in_string and ord(ch) < 32 and ch not in ('\n',):
+                clean.append(' ')
+                continue
+            if in_string and ch == '\n':
+                clean.append(' ')
+                continue
+            clean.append(ch)
+        json_str = ''.join(clean)
+        parsed = json.loads(json_str)
 
     # Normalize German field names to English
     field_map = {
