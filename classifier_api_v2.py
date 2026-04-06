@@ -57,7 +57,8 @@ def get_config():
         "GENERATE_EXPLANATIONS": os.getenv("GENERATE_EXPLANATIONS", "false").lower() == "true",
         "LEARNING_ENABLED": os.getenv("LEARNING_ENABLED", "true").lower() == "true",
         "FEW_SHOT_ENABLED": os.getenv("FEW_SHOT_ENABLED", "false").lower() == "true",
-        "INJECT_EXISTING_TYPES": os.getenv("INJECT_EXISTING_TYPES", "true").lower() == "true",
+        "INJECT_EXISTING_TYPES": os.getenv("INJECT_EXISTING_TYPES", "false").lower() == "true",
+        "INJECT_EXISTING_TAGS": os.getenv("INJECT_EXISTING_TAGS", "true").lower() == "true",
         "FUZZY_MATCH_THRESHOLD": float(os.getenv("FUZZY_MATCH_THRESHOLD", "0.80")),
         "API_HOST": os.getenv("API_HOST", "0.0.0.0"),
         "API_PORT": int(os.getenv("API_PORT", "8001")),
@@ -1547,7 +1548,8 @@ DASHBOARD_HTML = '''
                     { key: 'AUTO_COMMIT', label: 'Auto Commit', type: 'select', options: ['true', 'false'] },
                     { key: 'LEARNING_ENABLED', label: 'Learning Enabled', type: 'select', options: ['true', 'false'] },
                     { key: 'FEW_SHOT_ENABLED', label: 'Few-Shot Examples', type: 'select', options: ['false', 'true'] },
-                    { key: 'INJECT_EXISTING_TYPES', label: 'Inject Doc Types', type: 'select', options: ['true', 'false'] },
+                    { key: 'INJECT_EXISTING_TAGS', label: 'Inject Existing Tags', type: 'select', options: ['true', 'false'] },
+                    { key: 'INJECT_EXISTING_TYPES', label: 'Inject Doc Types', type: 'select', options: ['false', 'true'] },
                     { key: 'FUZZY_MATCH_THRESHOLD', label: 'Fuzzy Match Threshold' },
                     { key: 'GENERATE_EXPLANATIONS', label: 'Generate Explanations', type: 'select', options: ['false', 'true'] },
                 ];
@@ -1563,7 +1565,7 @@ DASHBOARD_HTML = '''
         }
         
         async function saveConfig() {
-            const keys = ['PAPERLESS_URL', 'PAPERLESS_TOKEN', 'OLLAMA_URL', 'OLLAMA_MODEL', 'OLLAMA_TEMPERATURE', 'OLLAMA_TOP_P', 'OLLAMA_TOP_K', 'MAX_PAGES', 'AUTO_COMMIT', 'LEARNING_ENABLED', 'FEW_SHOT_ENABLED', 'INJECT_EXISTING_TYPES', 'FUZZY_MATCH_THRESHOLD', 'GENERATE_EXPLANATIONS'];
+            const keys = ['PAPERLESS_URL', 'PAPERLESS_TOKEN', 'OLLAMA_URL', 'OLLAMA_MODEL', 'OLLAMA_TEMPERATURE', 'OLLAMA_TOP_P', 'OLLAMA_TOP_K', 'MAX_PAGES', 'AUTO_COMMIT', 'LEARNING_ENABLED', 'FEW_SHOT_ENABLED', 'INJECT_EXISTING_TAGS', 'INJECT_EXISTING_TYPES', 'FUZZY_MATCH_THRESHOLD', 'GENERATE_EXPLANATIONS'];
             for (const key of keys) {
                 const el = document.getElementById(`config-${key}`);
                 if (el) await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ key, value: el.value }) });
@@ -1818,7 +1820,7 @@ _ALLOWED_CONFIG_KEYS = {
     "PAPERLESS_URL", "PAPERLESS_TOKEN", "OLLAMA_URL", "OLLAMA_MODEL",
     "OLLAMA_THREADS", "OLLAMA_TEMPERATURE", "OLLAMA_TOP_P", "OLLAMA_TOP_K",
     "MAX_PAGES", "AUTO_COMMIT", "GENERATE_EXPLANATIONS", "LEARNING_ENABLED",
-    "FEW_SHOT_ENABLED", "INJECT_EXISTING_TYPES", "FUZZY_MATCH_THRESHOLD",
+    "FEW_SHOT_ENABLED", "INJECT_EXISTING_TAGS", "INJECT_EXISTING_TYPES", "FUZZY_MATCH_THRESHOLD",
     "API_HOST", "API_PORT", "POLL_INTERVAL",
 }
 
@@ -2116,7 +2118,8 @@ def generate_debug_export() -> Path:
         "auto_commit": cfg["AUTO_COMMIT"],
         "learning_enabled": cfg["LEARNING_ENABLED"],
         "few_shot_enabled": cfg.get("FEW_SHOT_ENABLED", False),
-        "inject_existing_types": cfg.get("INJECT_EXISTING_TYPES", True),
+        "inject_existing_tags": cfg.get("INJECT_EXISTING_TAGS", True),
+        "inject_existing_types": cfg.get("INJECT_EXISTING_TYPES", False),
         "fuzzy_match_threshold": cfg.get("FUZZY_MATCH_THRESHOLD", 0.80),
         "generate_explanations": cfg.get("GENERATE_EXPLANATIONS", False),
         "max_pages": cfg["MAX_PAGES"],

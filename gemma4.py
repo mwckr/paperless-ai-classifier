@@ -173,12 +173,92 @@ def get_document_metadata(doc_id: int) -> Optional[Dict]:
         return None
 
 
-def fetch_document_image(doc_id: int) -> Optional[Tuple[bytes, str, float]]:
-    """Fetch document image from Paperless with multi-strategy fallback"""
+def fetch_document_images(doc_id: int) -> Optional[List[Tuple[bytes, float]]]:
+    """Fetch document as list of page images from Paperless.
+    Returns list of (jpeg_bytes, size_kb) tuples — one per page.
+    Each page is rendered at high resolution for optimal vision model accuracy."""
     headers = {"Authorization": f"Token {_config.get('PAPERLESS_TOKEN')}"}
     max_pages = _config.get('MAX_PAGES', 3)
     
-    # Try preview first
+    # Strategy 1: Download PDF and convert each page to a separate high-res image
+    pdf_path = None
+    base_path = None
+    try:
+        response = requests.get(
+            f"{_config.get('PAPERLESS_URL')}/api/documents/{doc_id}/download/",
+            headers=headers,
+            timeout=30
+        )
+        response.raise_for_status()
+        content_type = response.headers.get('content-type', '')
+        
+        # If the document is already an image (not PDF), return it directly
+        if content_type.startswith('image/'):
+            img = Image.open(io.BytesIO(response.content))
+            max_size = 1536
+            if max(img.size) > max_size:
+                ratio = max_size / max(img.size)
+                new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                img = img.resize(new_size, Image.LANCZOS)
+            buffer = io.BytesIO()
+            img.convert('RGB').save(buffer, 'JPEG', quality=90)
+            img_bytes = buffer.getvalue()
+            img.close()
+            size_kb = len(img_bytes) / 1024
+            logger.info(f"Document is image: {size_kb:.1f} KB")
+            return [(img_bytes, size_kb)]
+        
+        # PDF conversion — one image per page
+        pdf_bytes = response.content
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as pdf_file:
+            pdf_file.write(pdf_bytes)
+            pdf_path = pdf_file.name
+        
+        base_path = tempfile.mktemp()
+        result = subprocess.run(
+            ['pdftoppm', '-jpeg', '-r', '200', '-scale-to', '1536',
+             '-l', str(max_pages), pdf_path, base_path],
+            capture_output=True,
+            timeout=60
+        )
+        
+        if result.returncode == 0:
+            page_files = sorted(glob.glob(f"{base_path}-*.jpg"))
+            if page_files:
+                page_images = []
+                for f in page_files:
+                    img = Image.open(f)
+                    max_size = 1536
+                    if max(img.size) > max_size:
+                        ratio = max_size / max(img.size)
+                        new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                        img = img.resize(new_size, Image.LANCZOS)
+                    buffer = io.BytesIO()
+                    img.convert('RGB').save(buffer, 'JPEG', quality=90)
+                    img_bytes = buffer.getvalue()
+                    img.close()
+                    page_images.append((img_bytes, len(img_bytes) / 1024))
+                
+                # Cleanup page files
+                for f in page_files:
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+                
+                total_kb = sum(s for _, s in page_images)
+                logger.info(f"PDF → {len(page_images)} page images, total {total_kb:.1f} KB")
+                return page_images
+    except Exception as e:
+        logger.warning(f"PDF conversion error: {e}")
+    finally:
+        if pdf_path:
+            try:
+                os.remove(pdf_path)
+            except OSError:
+                pass
+    
+    # Fallback: preview image
     try:
         response = requests.get(
             f"{_config.get('PAPERLESS_URL')}/api/documents/{doc_id}/preview/",
@@ -190,89 +270,11 @@ def fetch_document_image(doc_id: int) -> Optional[Tuple[bytes, str, float]]:
             if content_type.startswith('image/'):
                 size_kb = len(response.content) / 1024
                 logger.info(f"Got preview image: {size_kb:.1f} KB")
-                return response.content, content_type, size_kb
+                return [(response.content, size_kb)]
     except Exception as e:
         logger.debug(f"Preview fetch failed: {e}")
     
-    # Try PDF conversion
-    pdf_path = None
-    base_path = None
-    try:
-        response = requests.get(
-            f"{_config.get('PAPERLESS_URL')}/api/documents/{doc_id}/download/",
-            headers=headers,
-            timeout=30
-        )
-        response.raise_for_status()
-        pdf_bytes = response.content
-        
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as pdf_file:
-            pdf_file.write(pdf_bytes)
-            pdf_path = pdf_file.name
-        
-        base_path = tempfile.mktemp()
-        result = subprocess.run(
-            ['pdftoppm', '-jpeg', '-r', '72', '-scale-to', '1024',
-             '-l', str(max_pages), pdf_path, base_path],
-            capture_output=True,
-            timeout=60
-        )
-        
-        if result.returncode == 0:
-            page_files = sorted(glob.glob(f"{base_path}-*.jpg"))
-            if page_files:
-                if len(page_files) == 1:
-                    img = Image.open(page_files[0])
-                    max_size = 1024
-                    if max(img.size) > max_size:
-                        ratio = max_size / max(img.size)
-                        new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
-                        img = img.resize(new_size, Image.LANCZOS)
-                    buffer = io.BytesIO()
-                    img.convert('RGB').save(buffer, 'JPEG', quality=85)
-                    img_bytes = buffer.getvalue()
-                    img.close()
-                else:
-                    images = [Image.open(f) for f in page_files]
-                    total_height = sum(im.height for im in images)
-                    max_width = max(im.width for im in images)
-                    combined = Image.new('RGB', (max_width, total_height))
-                    y_offset = 0
-                    for im in images:
-                        combined.paste(im, (0, y_offset))
-                        y_offset += im.height
-                    max_size = 1024
-                    if max(combined.size) > max_size:
-                        ratio = max_size / max(combined.size)
-                        new_size = (int(combined.size[0] * ratio), int(combined.size[1] * ratio))
-                        combined = combined.resize(new_size, Image.LANCZOS)
-                    buffer = io.BytesIO()
-                    combined.save(buffer, 'JPEG', quality=85)
-                    img_bytes = buffer.getvalue()
-                    for im in images:
-                        im.close()
-                
-                # Cleanup page files
-                for f in page_files:
-                    try:
-                        os.remove(f)
-                    except OSError:
-                        pass
-                
-                size_kb = len(img_bytes) / 1024
-                logger.info(f"Converted PDF to image: {size_kb:.1f} KB ({len(page_files)} pages)")
-                return img_bytes, 'image/jpeg', size_kb
-    except Exception as e:
-        logger.warning(f"PDF conversion error: {e}")
-    finally:
-        # Always clean up the PDF temp file
-        if pdf_path:
-            try:
-                os.remove(pdf_path)
-            except OSError:
-                pass
-    
-    # Fallback to thumbnail
+    # Fallback: thumbnail
     try:
         response = requests.get(
             f"{_config.get('PAPERLESS_URL')}/api/documents/{doc_id}/thumb/",
@@ -282,9 +284,9 @@ def fetch_document_image(doc_id: int) -> Optional[Tuple[bytes, str, float]]:
         response.raise_for_status()
         size_kb = len(response.content) / 1024
         logger.info(f"Using thumbnail: {size_kb:.1f} KB")
-        return response.content, 'image/webp', size_kb
+        return [(response.content, size_kb)]
     except Exception as e:
-        logger.error(f"Failed to fetch image: {e}")
+        logger.error(f"Failed to fetch any image: {e}")
         return None
 
 
@@ -298,16 +300,17 @@ def _build_prompt() -> str:
     if _config.get('GENERATE_EXPLANATIONS', False):
         explanation_request = '\n5. erklärung - Kurze Begründung deiner Einordnung'
 
-    # Inject existing tags as hints for reuse
+    # Inject existing tags as hints for reuse (configurable)
     tags_hint = ""
-    existing_tags = get_existing_tags()
-    if existing_tags:
-        tags_list = ", ".join(existing_tags[:200])
-        tags_hint = f"\nExistierende Tags in Paperless (nur bei Übereinstimmung bevorzugt verwenden): {tags_list}"
+    if _config.get('INJECT_EXISTING_TAGS', True):
+        existing_tags = get_existing_tags()
+        if existing_tags:
+            tags_list = ", ".join(existing_tags[:200])
+            tags_hint = f"\nExistierende Tags in Paperless (nur bei Übereinstimmung bevorzugt verwenden): {tags_list}"
 
     # Optionally inject existing document types
     types_hint = ""
-    if _config.get('INJECT_EXISTING_TYPES', True):
+    if _config.get('INJECT_EXISTING_TYPES', False):
         existing_types = get_existing_document_types()
         if existing_types:
             types_list = ", ".join(existing_types[:50])
@@ -384,12 +387,13 @@ def _parse_response(raw: str) -> Optional[Dict]:
     return parsed
 
 
-def analyze_with_vision(image_bytes: bytes, content_type: str) -> Tuple[bool, Optional[Dict], float, int]:
+def analyze_with_vision(page_images: List[bytes]) -> Tuple[bool, Optional[Dict], float, int]:
     """
     Analyze document with vision model.
+    Accepts list of page images — each sent as separate image for full resolution.
     Returns: (success, result_dict, elapsed_seconds, estimated_tokens)
     """
-    image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+    images_b64 = [base64.b64encode(img).decode('utf-8') for img in page_images]
     prompt = _build_prompt()
     
     # Sampling parameters — configurable via .env
@@ -402,7 +406,7 @@ def analyze_with_vision(image_bytes: bytes, content_type: str) -> Tuple[bool, Op
         "messages": [{
             "role": "user",
             "content": prompt,
-            "images": [image_b64]
+            "images": images_b64
         }],
         "stream": False,
         "options": {
@@ -416,7 +420,7 @@ def analyze_with_vision(image_bytes: bytes, content_type: str) -> Tuple[bool, Op
     
     start = time.time()
     try:
-        logger.debug(f"Vision request: image {len(image_b64)} chars, model {_config.get('OLLAMA_MODEL')}")
+        logger.debug(f"Vision request: {len(images_b64)} images, model {_config.get('OLLAMA_MODEL')}")
         response = requests.post(f"{_config.get('OLLAMA_URL')}/api/chat", json=payload, timeout=600)
         elapsed = time.time() - start
         
@@ -568,12 +572,13 @@ def process_document(doc_id: int, apply_learning: bool = True) -> Dict:
     if not metadata:
         return {"doc_id": doc_id, "success": False, "reason": "metadata_fetch_failed"}
     
-    image_data = fetch_document_image(doc_id)
-    if not image_data:
+    page_images = fetch_document_images(doc_id)
+    if not page_images:
         return {"doc_id": doc_id, "success": False, "reason": "image_fetch_failed"}
     
-    image_bytes, content_type, size_kb = image_data
-    success, vision_result, elapsed, tokens = analyze_with_vision(image_bytes, content_type)
+    image_bytes_list = [img for img, _ in page_images]
+    total_size_kb = sum(s for _, s in page_images)
+    success, vision_result, elapsed, tokens = analyze_with_vision(image_bytes_list)
     
     if not success or not vision_result:
         return {
@@ -582,7 +587,7 @@ def process_document(doc_id: int, apply_learning: bool = True) -> Dict:
             "success": False,
             "reason": "vision_analysis_failed",
             "duration_sec": elapsed,
-            "image_size_kb": size_kb
+            "image_size_kb": total_size_kb
         }
     
     # Apply learning normalization: fuzzy-match tags/types/correspondents
@@ -607,7 +612,7 @@ def process_document(doc_id: int, apply_learning: bool = True) -> Dict:
         "success": True,
         "duration_sec": elapsed,
         "tokens_est": tokens,
-        "image_size_kb": size_kb,
+        "image_size_kb": total_size_kb,
         "document_type": vision_result.get('document_type'),
         "correspondent": vision_result.get('correspondent'),
         "tags": vision_result.get('tags', []),
