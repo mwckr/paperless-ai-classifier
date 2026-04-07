@@ -176,9 +176,11 @@ def get_document_metadata(doc_id: int) -> Optional[Dict]:
 def fetch_document_images(doc_id: int) -> Optional[List[Tuple[bytes, float]]]:
     """Fetch document as list of page images from Paperless.
     Returns list of (jpeg_bytes, size_kb) tuples — one per page.
-    Each page is rendered at high resolution for optimal vision model accuracy."""
+    Resolution and quality controlled by IMAGE_MAX_SIZE and IMAGE_QUALITY config."""
     headers = {"Authorization": f"Token {_config.get('PAPERLESS_TOKEN')}"}
     max_pages = _config.get('MAX_PAGES', 3)
+    max_size = _config.get('IMAGE_MAX_SIZE', 1024)
+    quality = _config.get('IMAGE_QUALITY', 85)
     
     # Strategy 1: Download PDF and convert each page to a separate high-res image
     pdf_path = None
@@ -195,13 +197,12 @@ def fetch_document_images(doc_id: int) -> Optional[List[Tuple[bytes, float]]]:
         # If the document is already an image (not PDF), return it directly
         if content_type.startswith('image/'):
             img = Image.open(io.BytesIO(response.content))
-            max_size = 1536
             if max(img.size) > max_size:
                 ratio = max_size / max(img.size)
                 new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
                 img = img.resize(new_size, Image.LANCZOS)
             buffer = io.BytesIO()
-            img.convert('RGB').save(buffer, 'JPEG', quality=90)
+            img.convert('RGB').save(buffer, 'JPEG', quality=quality)
             img_bytes = buffer.getvalue()
             img.close()
             size_kb = len(img_bytes) / 1024
@@ -216,7 +217,7 @@ def fetch_document_images(doc_id: int) -> Optional[List[Tuple[bytes, float]]]:
         
         base_path = tempfile.mktemp()
         result = subprocess.run(
-            ['pdftoppm', '-jpeg', '-r', '200', '-scale-to', '1536',
+            ['pdftoppm', '-jpeg', '-r', '150', '-scale-to', str(max_size),
              '-l', str(max_pages), pdf_path, base_path],
             capture_output=True,
             timeout=60
@@ -228,13 +229,12 @@ def fetch_document_images(doc_id: int) -> Optional[List[Tuple[bytes, float]]]:
                 page_images = []
                 for f in page_files:
                     img = Image.open(f)
-                    max_size = 1536
                     if max(img.size) > max_size:
                         ratio = max_size / max(img.size)
                         new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
                         img = img.resize(new_size, Image.LANCZOS)
                     buffer = io.BytesIO()
-                    img.convert('RGB').save(buffer, 'JPEG', quality=90)
+                    img.convert('RGB').save(buffer, 'JPEG', quality=quality)
                     img_bytes = buffer.getvalue()
                     img.close()
                     page_images.append((img_bytes, len(img_bytes) / 1024))
