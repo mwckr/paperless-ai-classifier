@@ -452,8 +452,9 @@ def analyze_with_vision(page_images: List[bytes]) -> Tuple[bool, Optional[Dict],
     
     start = time.time()
     try:
-        logger.debug(f"Vision request: {len(images_b64)} images, model {_config.get('OLLAMA_MODEL')}, options={options or 'model defaults'}")
-        response = requests.post(f"{_config.get('OLLAMA_URL')}/api/chat", json=payload, timeout=600)
+        vision_timeout = int(_config.get('OLLAMA_TIMEOUT', 600))
+        logger.debug(f"Vision request: {len(images_b64)} images, model {_config.get('OLLAMA_MODEL')}, options={options or 'model defaults'}, timeout={vision_timeout}s")
+        response = requests.post(f"{_config.get('OLLAMA_URL')}/api/chat", json=payload, timeout=vision_timeout)
         elapsed = time.time() - start
         
         if response.status_code != 200:

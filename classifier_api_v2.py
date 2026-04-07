@@ -50,6 +50,7 @@ def get_config():
         "MAX_PAGES": int(os.getenv("MAX_PAGES", "3")),
         "IMAGE_MAX_SIZE": int(os.getenv("IMAGE_MAX_SIZE", "1024")),
         "IMAGE_QUALITY": int(os.getenv("IMAGE_QUALITY", "85")),
+        "OLLAMA_TIMEOUT": int(os.getenv("OLLAMA_TIMEOUT", "600")),
         "AUTO_COMMIT": os.getenv("AUTO_COMMIT", "true").lower() == "true",
         "GENERATE_EXPLANATIONS": os.getenv("GENERATE_EXPLANATIONS", "false").lower() == "true",
         "LEARNING_ENABLED": os.getenv("LEARNING_ENABLED", "true").lower() == "true",
@@ -1564,6 +1565,7 @@ DASHBOARD_HTML = '''
                     { key: 'MAX_PAGES', label: 'Max Pages' },
                     { key: 'IMAGE_MAX_SIZE', label: 'Image Max Size (px)' },
                     { key: 'IMAGE_QUALITY', label: 'Image Quality (75-100)' },
+                    { key: 'OLLAMA_TIMEOUT', label: 'Ollama Timeout (sec)' },
                     { key: 'AUTO_COMMIT', label: 'Auto Commit', type: 'select', options: ['true', 'false'] },
                     { key: 'LEARNING_ENABLED', label: 'Learning', type: 'select', options: ['true', 'false'] },
                     { key: 'FEW_SHOT_ENABLED', label: 'Few-Shot Examples', type: 'select', options: ['false', 'true'] },
@@ -1588,7 +1590,7 @@ DASHBOARD_HTML = '''
         }
         
         async function saveConfig() {
-            const keys = ['PAPERLESS_URL', 'PAPERLESS_TOKEN', 'OLLAMA_URL', 'OLLAMA_MODEL', 'OLLAMA_TEMPERATURE', 'OLLAMA_TOP_P', 'OLLAMA_TOP_K', 'MAX_PAGES', 'IMAGE_MAX_SIZE', 'IMAGE_QUALITY', 'AUTO_COMMIT', 'LEARNING_ENABLED', 'FEW_SHOT_ENABLED', 'INJECT_EXISTING_TAGS', 'INJECT_EXISTING_TYPES', 'FUZZY_MATCH_THRESHOLD', 'GENERATE_EXPLANATIONS'];
+            const keys = ['PAPERLESS_URL', 'PAPERLESS_TOKEN', 'OLLAMA_URL', 'OLLAMA_MODEL', 'OLLAMA_TEMPERATURE', 'OLLAMA_TOP_P', 'OLLAMA_TOP_K', 'MAX_PAGES', 'IMAGE_MAX_SIZE', 'IMAGE_QUALITY', 'OLLAMA_TIMEOUT', 'AUTO_COMMIT', 'LEARNING_ENABLED', 'FEW_SHOT_ENABLED', 'INJECT_EXISTING_TAGS', 'INJECT_EXISTING_TYPES', 'FUZZY_MATCH_THRESHOLD', 'GENERATE_EXPLANATIONS'];
             for (const key of keys) {
                 const el = document.getElementById(`config-${key}`);
                 if (el) await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ key, value: el.value }) });
@@ -1853,7 +1855,7 @@ async def get_config_api():
 _ALLOWED_CONFIG_KEYS = {
     "PAPERLESS_URL", "PAPERLESS_TOKEN", "OLLAMA_URL", "OLLAMA_MODEL",
     "OLLAMA_THREADS", "OLLAMA_TEMPERATURE", "OLLAMA_TOP_P", "OLLAMA_TOP_K",
-    "MAX_PAGES", "IMAGE_MAX_SIZE", "IMAGE_QUALITY",
+    "MAX_PAGES", "IMAGE_MAX_SIZE", "IMAGE_QUALITY", "OLLAMA_TIMEOUT",
     "AUTO_COMMIT", "GENERATE_EXPLANATIONS", "LEARNING_ENABLED",
     "FEW_SHOT_ENABLED", "INJECT_EXISTING_TAGS", "INJECT_EXISTING_TYPES", "FUZZY_MATCH_THRESHOLD",
     "API_HOST", "API_PORT", "POLL_INTERVAL",
