@@ -937,9 +937,12 @@ DASHBOARD_HTML = '''
                 </div>
             </div>
             
-            <div class="actions">
+            <div class="actions" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
                 <button onclick="refreshAll()">Refresh</button>
                 <button onclick="clearQueue()" class="danger">Clear Queue</button>
+                <span style="border-left: 1px solid #444; height: 28px;"></span>
+                <input type="number" id="manual-doc-id" placeholder="Document ID" min="1" style="width:130px; padding:8px 12px; background:#1a1a2e; border:1px solid #444; border-radius:6px; color:#e0e0e0; font-size:14px;">
+                <button onclick="classifyManual()">Process</button>
             </div>
             
             <div class="card">
@@ -1638,6 +1641,19 @@ DASHBOARD_HTML = '''
                 await fetch('/api/queue/clear', { method: 'DELETE' });
                 refreshAll();
             }
+        }
+        
+        async function classifyManual() {
+            const input = document.getElementById('manual-doc-id');
+            const docId = parseInt(input.value);
+            if (!docId || docId < 1) { input.focus(); return; }
+            try {
+                const resp = await fetch('/api/classify', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ document_id: docId }) });
+                const data = await resp.json();
+                input.value = '';
+                if (data.status === 'already_queued') { alert('Document ' + docId + ' is already in queue'); }
+                refreshAll();
+            } catch(e) { alert('Error: ' + e.message); }
         }
         
         async function deleteEntry(id) {
