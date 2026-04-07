@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Paperless Document Classifier API v2
-=====================================
+Paperless Document Classifier API
+==================================
 FastAPI service with:
 - SQLite audit log and web dashboard
-- Gemma 4 / Ministral model support
-- Learning layer for continuous improvement
-- Dashboard training interface
-- Export logs for debugging
+- Any Ollama vision model (Gemma3, Ministral, etc.)
+- Learning layer with fuzzy matching and term mappings
+- Review/correction interface
+- Debug export and log viewer
 """
 import os
 import asyncio
@@ -16,8 +16,6 @@ import logging
 import json
 import requests
 import platform
-import shutil
-import glob
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from pathlib import Path
@@ -865,8 +863,8 @@ DASHBOARD_HTML = '''
         
         <div class="tabs">
             <button class="tab active" onclick="showTab('status')">Status</button>
-            <button class="tab" onclick="showTab('training')">Training</button>
-            <button class="tab" onclick="showTab('mappings')">Mappings</button>
+            <button class="tab" onclick="showTab('training')">Review</button>
+            <button class="tab" onclick="showTab('mappings')">Data</button>
             <button class="tab" onclick="showTab('export')">Export</button>
             <button class="tab" onclick="showTab('logs')">Logs</button>
             <button class="tab" onclick="showTab('config')">Config</button>
@@ -973,8 +971,8 @@ DASHBOARD_HTML = '''
         <!-- TRAINING TAB -->
         <div id="tab-training" class="tab-content">
             <div class="card">
-                <h3>Train the System</h3>
-                <p style="color: #888; margin-bottom: 15px;">Review recent classifications and correct any mistakes. Your corrections teach the system to improve.</p>
+                <h3>Review Classifications</h3>
+                <p style="color: #888; margin-bottom: 15px;">Review recent results and correct mistakes. Corrections are learned automatically for future classifications.</p>
                 <div style="overflow-x: auto;">
                     <table>
                         <thead>
@@ -993,11 +991,11 @@ DASHBOARD_HTML = '''
             </div>
         </div>
         
-        <!-- MAPPINGS TAB -->
+        <!-- DATA TAB -->
         <div id="tab-mappings" class="tab-content">
             <div class="card">
-                <h3>Learned Term Mappings</h3>
-                <p style="color: #888; margin-bottom: 15px;">These mappings are automatically applied to normalize AI suggestions.</p>
+                <h3>Term Mappings</h3>
+                <p style="color: #888; margin-bottom: 15px;">Mappings automatically normalize AI suggestions (e.g. &quot;Stellcase&quot; → &quot;Steelcase&quot;).</p>
                 <div class="actions">
                     <button onclick="showAddMappingModal()">Add Mapping</button>
                     <button onclick="resetLearning()" class="danger">Reset All Learning</button>
@@ -1421,8 +1419,9 @@ DASHBOARD_HTML = '''
                         const tags = (log.tags || []).slice(0, 3).map(t => `<span class="tag">${t}</span>`).join('');
                         const statusClass = 'status-' + log.status;
                         const conf = log.confidence ? Math.round(log.confidence * 100) + '%' : '-';
+                        const explanation = log.explanation ? escapeHtml(log.explanation).substring(0, 300) : '';
                         
-                        return `<tr>
+                        let row = `<tr>
                             <td style="white-space:nowrap">${time}</td>
                             <td>${log.document_id}</td>
                             <td>${(log.document_title || '-').substring(0, 30)}</td>
@@ -1436,6 +1435,10 @@ DASHBOARD_HTML = '''
                                 <button onclick="deleteEntry(${log.id})" class="delete-btn" title="Delete">×</button>
                             </td>
                         </tr>`;
+                        if (explanation) {
+                            row += `<tr><td colspan="9" style="padding: 4px 15px 10px; border-top: none; color: #888; font-size: 0.85em; line-height: 1.4;"><strong style="color:#00d4ff;">AI:</strong> ${explanation}</td></tr>`;
+                        }
+                        return row;
                     }).join('');
                 } else {
                     tbody.innerHTML = '<tr><td colspan="9" style="color: #888;">No activity yet</td></tr>';
@@ -1542,33 +1545,44 @@ DASHBOARD_HTML = '''
         async function refreshConfig() {
             try {
                 const data = await fetchJson('/api/config');
+                // Fetch available Ollama models for dropdown
+                let ollamaModels = [];
+                try {
+                    const modelsData = await fetchJson('/api/ollama/models');
+                    ollamaModels = modelsData.models || [];
+                } catch(e) { console.warn('Could not fetch Ollama models'); }
+                
                 const form = document.getElementById('config-form');
                 const items = [
                     { key: 'PAPERLESS_URL', label: 'Paperless URL' },
                     { key: 'PAPERLESS_TOKEN', label: 'Paperless Token', type: 'password' },
                     { key: 'OLLAMA_URL', label: 'Ollama URL' },
-                    { key: 'OLLAMA_MODEL', label: 'Model' },
-                    { key: 'OLLAMA_TEMPERATURE', label: 'Temperature' },
-                    { key: 'OLLAMA_TOP_P', label: 'Top P' },
-                    { key: 'OLLAMA_TOP_K', label: 'Top K' },
+                    { key: 'OLLAMA_MODEL', label: 'Model', type: ollamaModels.length ? 'model-select' : 'text' },
+                    { key: 'OLLAMA_TEMPERATURE', label: 'Temperature', placeholder: 'model default' },
+                    { key: 'OLLAMA_TOP_P', label: 'Top P', placeholder: 'model default' },
+                    { key: 'OLLAMA_TOP_K', label: 'Top K', placeholder: 'model default' },
                     { key: 'MAX_PAGES', label: 'Max Pages' },
                     { key: 'IMAGE_MAX_SIZE', label: 'Image Max Size (px)' },
                     { key: 'IMAGE_QUALITY', label: 'Image Quality (75-100)' },
                     { key: 'AUTO_COMMIT', label: 'Auto Commit', type: 'select', options: ['true', 'false'] },
-                    { key: 'LEARNING_ENABLED', label: 'Learning Enabled', type: 'select', options: ['true', 'false'] },
+                    { key: 'LEARNING_ENABLED', label: 'Learning', type: 'select', options: ['true', 'false'] },
                     { key: 'FEW_SHOT_ENABLED', label: 'Few-Shot Examples', type: 'select', options: ['false', 'true'] },
                     { key: 'INJECT_EXISTING_TAGS', label: 'Inject Existing Tags', type: 'select', options: ['true', 'false'] },
                     { key: 'INJECT_EXISTING_TYPES', label: 'Inject Doc Types', type: 'select', options: ['false', 'true'] },
                     { key: 'FUZZY_MATCH_THRESHOLD', label: 'Fuzzy Match Threshold' },
-                    { key: 'GENERATE_EXPLANATIONS', label: 'Generate Explanations', type: 'select', options: ['false', 'true'] },
+                    { key: 'GENERATE_EXPLANATIONS', label: 'Explanations', type: 'select', options: ['false', 'true'] },
                 ];
                 
                 form.innerHTML = items.map(item => {
                     const value = data[item.key] || '';
+                    if (item.type === 'model-select') {
+                        const opts = ollamaModels.map(m => `<option value="${m}" ${m === value ? 'selected' : ''}>${m}</option>`).join('');
+                        return `<div class="config-item"><label>${item.label}</label><select id="config-${item.key}">${opts}</select></div>`;
+                    }
                     if (item.type === 'select') {
                         return `<div class="config-item"><label>${item.label}</label><select id="config-${item.key}">${item.options.map(o => `<option value="${o}" ${String(value).toLowerCase() === o ? 'selected' : ''}>${o}</option>`).join('')}</select></div>`;
                     }
-                    return `<div class="config-item"><label>${item.label}</label><input type="${item.type || 'text'}" id="config-${item.key}" value="${value}"></div>`;
+                    return `<div class="config-item"><label>${item.label}</label><input type="${item.type || 'text'}" id="config-${item.key}" value="${value}" ${item.placeholder ? 'placeholder="' + item.placeholder + '"' : ''}></div>`;
                 }).join('');
             } catch (e) { console.error(e); }
         }
@@ -1579,7 +1593,18 @@ DASHBOARD_HTML = '''
                 const el = document.getElementById(`config-${key}`);
                 if (el) await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ key, value: el.value }) });
             }
-            alert('Saved! Restart service for changes to take effect.');
+            if (confirm('Config saved. Restart service now to apply changes?')) {
+                await fetch('/api/restart', { method: 'POST' });
+                document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#00d4ff;font-family:sans-serif;font-size:1.5em;">Restarting... page will reload automatically.</div>';
+                const waitForRestart = async () => {
+                    for (let i = 0; i < 30; i++) {
+                        await new Promise(r => setTimeout(r, 2000));
+                        try { const r = await fetch('/api/health'); if (r.ok) { location.reload(); return; } } catch(e) {}
+                    }
+                    location.reload();
+                };
+                waitForRestart();
+            }
         }
         
         async function addMapping() {
@@ -1843,6 +1868,29 @@ async def update_config(update: ConfigUpdate):
         return {"status": "skipped", "key": update.key, "reason": "redacted value unchanged"}
     set_key(str(ENV_FILE), update.key, update.value, quote_mode="never")
     return {"status": "updated", "key": update.key}
+
+@app.post("/api/restart")
+async def restart_service():
+    """Restart the service by exiting — systemd will restart it automatically."""
+    logger.info("Restart requested via API")
+    # Schedule shutdown after returning the response
+    asyncio.get_event_loop().call_later(0.5, lambda: os._exit(0))
+    return {"status": "restarting"}
+
+@app.get("/api/ollama/models")
+async def get_ollama_models():
+    """Fetch available models from Ollama."""
+    cfg = get_config()
+    try:
+        resp = await asyncio.to_thread(
+            requests.get, f"{cfg['OLLAMA_URL']}/api/tags", timeout=10
+        )
+        if resp.status_code == 200:
+            models = resp.json().get("models", [])
+            return {"models": [m["name"] for m in models]}
+    except Exception as e:
+        logger.warning(f"Failed to fetch Ollama models: {e}")
+    return {"models": []}
 
 @app.post("/api/classify")
 async def classify_document(request: ClassifyRequest):

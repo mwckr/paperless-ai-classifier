@@ -2,10 +2,10 @@
 """
 Vision Model Integration for Paperless AI Classifier
 =====================================================
-Supports any Ollama vision model (Gemma4, Qwen3-VL, etc.).
+Supports any Ollama vision model (Gemma3, Ministral, etc.).
 Freeform classification with post-processing normalization.
 
-Config is passed in from classifier_api.py - no direct .env reading.
+Config is passed in from classifier_api_v2.py - no direct .env reading.
 """
 import os
 import requests
