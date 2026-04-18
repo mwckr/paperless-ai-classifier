@@ -1,22 +1,27 @@
 #!/bin/bash
 #
-# Paperless AI Classifier - Upgrade to v3
+# Paperless AI Classifier — Upgrade to v3
 # ========================================
-# Changes from v2:
-#   - Freeform AI classification (no tag injection into prompt)
-#   - Post-processing normalization via fuzzy matching
-#   - Configurable sampling parameters (temperature, top_p, top_k)
-#   - Queue deduplication & async I/O improvements
-#   - Paperless data caching per batch
-#   - Removed ministral.py dependency
 #
-# Handles upgrades from:
-#   - v1 (ministral + classifier_api.py only)
-#   - v2 (gemma4 + learning + classifier_api_v2.py)
+# Upgrades from v1 (commit 34fdc13 era: ministral.py + classifier_api.py)
+# to v3 (gemma4.py + learning.py + classifier_api_v2.py)
+#
+# What changes:
+#   - New AI engine: gemma4.py (multi-model support, multi-page images)
+#   - New learning layer: learning.py (fuzzy matching, term mappings)
+#   - New API server: classifier_api_v2.py (dashboard v2 with review/config/logs)
+#   - Database: 2 new tables (term_mappings, classification_examples) + ai_raw column
+#   - .env: 9+ new configuration keys added (existing keys preserved)
+#   - systemd: ExecStart updated to classifier_api_v2.py
+#   - Old files (ministral.py, classifier_api.py) left in place but unused
+#
+# Prerequisites:
+#   - Git repo cloned somewhere (e.g. /root/paperless-ai-classifier)
+#   - Production install at /opt/paperless-classifier (from original install.sh)
 #
 # Usage:
-#   cd /opt/paperless-classifier
-#   wget https://raw.githubusercontent.com/mwckr/paperless-ai-classifier/main/upgrade_v3.sh
+#   cd /root/paperless-ai-classifier   # or wherever you cloned the repo
+#   git pull
 #   chmod +x upgrade_v3.sh
 #   ./upgrade_v3.sh
 #
@@ -32,155 +37,148 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROD_DIR="/opt/paperless-classifier"
-
-# Determine install directory: use prod dir if it exists, else script dir
-if [[ -d "${PROD_DIR}" ]]; then
-    INSTALL_DIR="${PROD_DIR}"
-else
-    INSTALL_DIR="${SCRIPT_DIR}"
-fi
-
-# If running from a different dir than prod, inform the user
-if [[ "${SCRIPT_DIR}" != "${INSTALL_DIR}" ]]; then
-    echo -e "${YELLOW}Note: Running from ${SCRIPT_DIR}${NC}"
-    echo -e "${YELLOW}      Production directory detected: ${INSTALL_DIR}${NC}"
-    echo ""
-fi
-
-BACKUP_DIR="${INSTALL_DIR}/backup_v3_$(date +%Y%m%d_%H%M%S)"
-REPO_URL="https://raw.githubusercontent.com/mwckr/paperless-ai-classifier/main"
+SERVICE_NAME="paperless-classifier"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 echo ""
 echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}Paperless AI Classifier - Upgrade to v3${NC}"
+echo -e "${BLUE}Paperless AI Classifier — Upgrade to v3${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
-echo "This upgrade includes:"
-echo "  • Freeform AI + smart post-processing (better tag quality)"
-echo "  • Configurable sampling parameters (temperature, top_p, top_k)"
-echo "  • Queue deduplication & non-blocking async I/O"
-echo "  • Paperless data caching (faster batch processing)"
-echo "  • Configurable fuzzy match threshold"
-echo ""
 
-# Detect current version
-CURRENT_VERSION="unknown"
-if [[ -f "${INSTALL_DIR}/classifier_api_v2.py" ]] || [[ -f "${INSTALL_DIR}/classifier_api.py" ]]; then
-    if [[ -f "${INSTALL_DIR}/learning.py" ]] && [[ -f "${INSTALL_DIR}/gemma4.py" ]]; then
-        CURRENT_VERSION="v2"
-    elif [[ -f "${INSTALL_DIR}/ministral.py" ]]; then
-        CURRENT_VERSION="v1"
+# ---- PRE-FLIGHT CHECKS ----
+
+# Must have source files in the git repo
+for f in classifier_api_v2.py gemma4.py learning.py; do
+    if [[ ! -f "${SCRIPT_DIR}/${f}" ]]; then
+        echo -e "${RED}Error: ${f} not found in ${SCRIPT_DIR}${NC}"
+        echo "Make sure you run this from the git repo directory after 'git pull'."
+        exit 1
     fi
-fi
+done
 
-if [[ "${CURRENT_VERSION}" == "unknown" ]]; then
-    echo -e "${RED}Error: Could not detect current installation.${NC}"
-    echo "Please ensure you're in the paperless-classifier directory."
-    echo "  cd /opt/paperless-classifier"
+# Must have production directory
+if [[ ! -d "${PROD_DIR}" ]]; then
+    echo -e "${RED}Error: ${PROD_DIR} not found.${NC}"
+    echo "This script upgrades an existing installation. Run install.sh first."
     exit 1
 fi
 
-echo -e "Detected current version: ${YELLOW}${CURRENT_VERSION}${NC}"
+# Must have .env
+ENV_FILE="${PROD_DIR}/.env"
+if [[ ! -f "${ENV_FILE}" ]]; then
+    echo -e "${RED}Error: ${ENV_FILE} not found.${NC}"
+    echo "Cannot upgrade without existing configuration."
+    exit 1
+fi
+
+# Detect current version
+if [[ -f "${PROD_DIR}/classifier_api_v2.py" ]] && [[ -f "${PROD_DIR}/learning.py" ]]; then
+    CURRENT="v2/v3 (already upgraded — will update files)"
+elif [[ -f "${PROD_DIR}/classifier_api.py" ]]; then
+    CURRENT="v1 (classifier_api.py + ministral.py)"
+else
+    echo -e "${RED}Error: Could not detect current version in ${PROD_DIR}.${NC}"
+    exit 1
+fi
+
+echo "Detected:    ${CURRENT}"
+echo "Source:      ${SCRIPT_DIR}"
+echo "Production:  ${PROD_DIR}"
+echo ""
+echo "This upgrade includes:"
+echo "  • Multi-model vision engine (gemma3, ministral, llama, etc.)"
+echo "  • Multi-page document analysis with configurable image quality"
+echo "  • Learning layer — fuzzy matching normalizes AI output"
+echo "  • Review tab — correct classifications, system learns"
+echo "  • Config editor in dashboard with service restart"
+echo "  • Manual document processing by ID"
+echo "  • Logs viewer & debug export"
+echo "  • Configurable Ollama timeout, image size, sampling params"
 echo ""
 
-# Check for root
-if [[ $EUID -ne 0 ]]; then
-    echo -e "${YELLOW}Note: Not running as root. Some operations may fail.${NC}"
+read -p "Continue with upgrade? [Y/n]: " confirm
+if [[ "${confirm}" == "n" || "${confirm}" == "N" ]]; then
+    echo "Aborted."
+    exit 0
 fi
 
 # ---- STEP 1: BACKUP ----
-echo -e "${YELLOW}[1/7] Creating backup in: ${BACKUP_DIR}${NC}"
+BACKUP_DIR="${PROD_DIR}/backup_v3_$(date +%Y%m%d_%H%M%S)"
+echo ""
+echo -e "${BLUE}[1/6] Backing up current installation...${NC}"
 mkdir -p "${BACKUP_DIR}"
 
 for file in classifier_api.py classifier_api_v2.py ministral.py gemma4.py learning.py .env classifier_audit.db; do
-    if [[ -f "${INSTALL_DIR}/${file}" ]]; then
-        cp "${INSTALL_DIR}/${file}" "${BACKUP_DIR}/"
-        echo "  Backed up: ${file}"
+    if [[ -f "${PROD_DIR}/${file}" ]]; then
+        cp "${PROD_DIR}/${file}" "${BACKUP_DIR}/"
+        echo "  → ${file}"
     fi
 done
+echo -e "  ${GREEN}Saved to: ${BACKUP_DIR}${NC}"
 
-# ---- STEP 2: DOWNLOAD FILES ----
+# ---- STEP 2: STOP SERVICE ----
 echo ""
-echo -e "${BLUE}[2/7] Downloading new files...${NC}"
-
-download_file() {
-    local filename="$1"
-    local url="${REPO_URL}/${filename}"
-
-    echo -n "  ${filename}... "
-    if curl -fsSL "${url}" -o "${INSTALL_DIR}/${filename}.new" 2>/dev/null; then
-        mv "${INSTALL_DIR}/${filename}.new" "${INSTALL_DIR}/${filename}"
-        echo -e "${GREEN}OK${NC}"
-        return 0
-    elif wget -qO "${INSTALL_DIR}/${filename}.new" "${url}" 2>/dev/null; then
-        mv "${INSTALL_DIR}/${filename}.new" "${INSTALL_DIR}/${filename}"
-        echo -e "${GREEN}OK${NC}"
-        return 0
-    else
-        rm -f "${INSTALL_DIR}/${filename}.new"
-        echo -e "${RED}FAILED${NC}"
-        return 1
-    fi
-}
-
-FILES_TO_DOWNLOAD=(
-    "gemma4.py"
-    "learning.py"
-    "classifier_api_v2.py"
-)
-
-DOWNLOAD_FAILED=0
-for file in "${FILES_TO_DOWNLOAD[@]}"; do
-    if ! download_file "${file}"; then
-        DOWNLOAD_FAILED=1
-    fi
-done
-
-if [[ ${DOWNLOAD_FAILED} -eq 1 ]]; then
-    echo ""
-    echo -e "${RED}Some downloads failed. Restoring backup...${NC}"
-    cp "${BACKUP_DIR}"/* "${INSTALL_DIR}/" 2>/dev/null || true
-    echo "Upgrade aborted. Check network connectivity."
-    exit 1
+echo -e "${BLUE}[2/6] Stopping service...${NC}"
+if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    systemctl stop "${SERVICE_NAME}"
+    echo -e "  ${GREEN}Stopped${NC}"
+else
+    echo "  Not running — OK"
 fi
 
-# ---- STEP 3: DATABASE MIGRATION ----
+# ---- STEP 3: COPY FILES ----
 echo ""
-echo -e "${BLUE}[3/7] Updating database schema...${NC}"
+echo -e "${BLUE}[3/6] Installing new files...${NC}"
 
-python3 << 'PYEOF'
+cp "${SCRIPT_DIR}/classifier_api_v2.py" "${PROD_DIR}/"
+echo "  → classifier_api_v2.py  (API server + dashboard)"
+
+cp "${SCRIPT_DIR}/gemma4.py" "${PROD_DIR}/"
+echo "  → gemma4.py             (vision classification engine)"
+
+cp "${SCRIPT_DIR}/learning.py" "${PROD_DIR}/"
+echo "  → learning.py           (fuzzy matching + term mappings)"
+
+# Create logs directory for log viewer / export feature
+mkdir -p "${PROD_DIR}/logs"
+
+# Clear Python cache to avoid stale bytecode
+rm -rf "${PROD_DIR}/__pycache__"
+echo "  → Cleared __pycache__"
+
+# ---- STEP 4: DATABASE MIGRATION ----
+echo ""
+echo -e "${BLUE}[4/6] Migrating database...${NC}"
+
+DB_FILE="${PROD_DIR}/classifier_audit.db"
+if [[ ! -f "${DB_FILE}" ]]; then
+    echo "  No database found — will be created on first start"
+else
+    python3 << 'PYEOF'
 import sqlite3
-from pathlib import Path
 
-db_path = Path("/opt/paperless-classifier/classifier_audit.db")
-if not db_path.exists():
-    db_path = Path("classifier_audit.db")
-
-conn = sqlite3.connect(db_path)
+db = "/opt/paperless-classifier/classifier_audit.db"
+conn = sqlite3.connect(db)
 c = conn.cursor()
+changes = []
 
-# Ensure all tables exist (idempotent)
-c.execute('''
-    CREATE TABLE IF NOT EXISTS audit_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        document_id INTEGER NOT NULL,
-        document_title TEXT,
-        timestamp TEXT NOT NULL,
-        status TEXT NOT NULL,
-        document_type TEXT,
-        correspondent TEXT,
-        tags TEXT,
-        confidence REAL,
-        processing_time REAL,
-        tokens_used INTEGER,
-        auto_approved INTEGER,
-        error_message TEXT,
-        explanation TEXT,
-        ai_raw TEXT
-    )
-''')
+# Check existing audit_log columns
+c.execute("PRAGMA table_info(audit_log)")
+cols = [row[1] for row in c.fetchall()]
 
-c.execute('''
+# Add ai_raw column (new in v3 — stores raw AI response for debugging)
+if "ai_raw" not in cols:
+    c.execute("ALTER TABLE audit_log ADD COLUMN ai_raw TEXT")
+    changes.append("audit_log: added ai_raw column")
+
+# explanation column should exist from v1 but just in case
+if "explanation" not in cols:
+    c.execute("ALTER TABLE audit_log ADD COLUMN explanation TEXT")
+    changes.append("audit_log: added explanation column")
+
+# New table: term_mappings (learning layer — AI term → approved term)
+c.execute("""
     CREATE TABLE IF NOT EXISTS term_mappings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         term_type TEXT NOT NULL,
@@ -191,9 +189,11 @@ c.execute('''
         last_used INTEGER DEFAULT (strftime('%s', 'now')),
         UNIQUE(term_type, ai_term)
     )
-''')
+""")
+c.execute("CREATE INDEX IF NOT EXISTS idx_mappings_lookup ON term_mappings(term_type, ai_term)")
 
-c.execute('''
+# New table: classification_examples (few-shot learning)
+c.execute("""
     CREATE TABLE IF NOT EXISTS classification_examples (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         document_id INTEGER,
@@ -205,154 +205,143 @@ c.execute('''
         user_verified INTEGER DEFAULT 0,
         created_at INTEGER DEFAULT (strftime('%s', 'now'))
     )
-''')
+""")
+c.execute("CREATE INDEX IF NOT EXISTS idx_examples_verified ON classification_examples(user_verified, confidence DESC)")
 
-# Add columns that may be missing (v1 -> v3)
-for col, col_type in [('confidence', 'REAL'), ('ai_raw', 'TEXT'), ('explanation', 'TEXT')]:
-    try:
-        c.execute(f'ALTER TABLE audit_log ADD COLUMN {col} {col_type}')
-        print(f"  Added {col} column to audit_log")
-    except:
-        pass
-
-# Ensure indexes
-c.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON audit_log(timestamp DESC)')
-c.execute('CREATE INDEX IF NOT EXISTS idx_document_id ON audit_log(document_id)')
-c.execute('CREATE INDEX IF NOT EXISTS idx_mappings_lookup ON term_mappings(term_type, ai_term)')
-c.execute('CREATE INDEX IF NOT EXISTS idx_examples_verified ON classification_examples(user_verified, confidence DESC)')
+# Ensure indexes on audit_log
+c.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON audit_log(timestamp DESC)")
+c.execute("CREATE INDEX IF NOT EXISTS idx_document_id ON audit_log(document_id)")
 
 conn.commit()
 conn.close()
-print("  Database schema updated")
+
+if changes:
+    for ch in changes:
+        print(f"  → {ch}")
+else:
+    print("  Schema already up to date")
+print("  → term_mappings table: ready")
+print("  → classification_examples table: ready")
 PYEOF
-
-# ---- STEP 4: UPDATE .env ----
-echo ""
-echo -e "${BLUE}[4/7] Updating .env configuration...${NC}"
-
-ENV_FILE="${INSTALL_DIR}/.env"
-if [[ -f "${ENV_FILE}" ]]; then
-    # Model upgrade prompt
-    CURRENT_MODEL=$(grep "^OLLAMA_MODEL=" "${ENV_FILE}" 2>/dev/null | cut -d'=' -f2 || echo "")
-    if [[ -n "${CURRENT_MODEL}" ]] && [[ "${CURRENT_MODEL}" != *"gemma4"* ]]; then
-        echo "  Current model: ${CURRENT_MODEL}"
-        echo -e "${YELLOW}  Recommend switching to gemma4:e4b for best results.${NC}"
-        read -p "  Switch to gemma4:e4b? [Y/n]: " switch_model
-        if [[ "${switch_model}" != "n" && "${switch_model}" != "N" ]]; then
-            sed -i "s|^OLLAMA_MODEL=.*|OLLAMA_MODEL=gemma4:e4b|" "${ENV_FILE}"
-            echo -e "  ${GREEN}Switched to gemma4:e4b${NC}"
-        fi
-    fi
-
-    # Add new v3 config keys
-    add_env_key() {
-        local key="$1"
-        local value="$2"
-        if ! grep -q "^${key}=" "${ENV_FILE}"; then
-            echo "${key}=${value}" >> "${ENV_FILE}"
-            echo "  Added: ${key}=${value}"
-        fi
-    }
-
-    add_env_key "LEARNING_ENABLED" "true"
-    add_env_key "FEW_SHOT_ENABLED" "false"
-    add_env_key "INJECT_EXISTING_TYPES" "true"
-    add_env_key "FUZZY_MATCH_THRESHOLD" "0.80"
-    add_env_key "OLLAMA_TEMPERATURE" "0.7"
-    add_env_key "OLLAMA_TOP_P" "0.95"
-    add_env_key "OLLAMA_TOP_K" "64"
-    add_env_key "GENERATE_EXPLANATIONS" "false"
-
-    # Remove deprecated INJECT_EXISTING_TAGS if present
-    if grep -q "^INJECT_EXISTING_TAGS=" "${ENV_FILE}"; then
-        sed -i '/^INJECT_EXISTING_TAGS=/d' "${ENV_FILE}"
-        echo "  Removed deprecated: INJECT_EXISTING_TAGS"
-    fi
-else
-    echo -e "${YELLOW}  Warning: .env not found, skipping config update${NC}"
 fi
 
-# ---- STEP 5: UPDATE SYSTEMD SERVICE ----
+# ---- STEP 5: UPDATE .env ----
 echo ""
-echo -e "${BLUE}[5/7] Updating systemd service...${NC}"
+echo -e "${BLUE}[5/6] Updating .env configuration...${NC}"
 
-SERVICE_FILE="/etc/systemd/system/paperless-classifier.service"
+# Helper: add key=value to .env if the key doesn't exist yet
+add_env() {
+    local key="$1"
+    local value="$2"
+    local comment="$3"
+    if ! grep -q "^${key}=" "${ENV_FILE}" 2>/dev/null; then
+        if [[ -n "${comment}" ]]; then
+            echo "" >> "${ENV_FILE}"
+            echo "# ${comment}" >> "${ENV_FILE}"
+        fi
+        echo "${key}=${value}" >> "${ENV_FILE}"
+        echo -e "  + ${key}=${value}"
+    fi
+}
+
+# Image processing (new in v3)
+add_env "IMAGE_MAX_SIZE" "1024" "Image processing — max pixel dimension sent to Ollama"
+add_env "IMAGE_QUALITY" "85"
+
+# Ollama timeout
+add_env "OLLAMA_TIMEOUT" "600" "Ollama vision request timeout (seconds)"
+
+# Learning layer (new in v3)
+add_env "LEARNING_ENABLED" "true" "Learning layer — post-processing normalization"
+add_env "FUZZY_MATCH_THRESHOLD" "0.80"
+add_env "FEW_SHOT_ENABLED" "false"
+
+# Tag/type injection
+add_env "INJECT_EXISTING_TAGS" "true" "Inject existing Paperless tags/types into AI prompt"
+add_env "INJECT_EXISTING_TYPES" "false"
+
+# Sampling params — add as comments (model defaults are recommended)
+if ! grep -q "OLLAMA_TEMPERATURE" "${ENV_FILE}" 2>/dev/null; then
+    echo "" >> "${ENV_FILE}"
+    echo "# Sampling params — leave commented to use model defaults (recommended)" >> "${ENV_FILE}"
+    echo "# OLLAMA_TEMPERATURE=0.7" >> "${ENV_FILE}"
+    echo "# OLLAMA_TOP_P=0.95" >> "${ENV_FILE}"
+    echo "# OLLAMA_TOP_K=64" >> "${ENV_FILE}"
+    echo -e "  + Sampling params (commented out — uses model defaults)"
+fi
+
+# Model recommendation
+echo ""
+CURRENT_MODEL=$(grep "^OLLAMA_MODEL=" "${ENV_FILE}" 2>/dev/null | cut -d'=' -f2 | tr -d "'" | tr -d '"')
+echo -e "  Current model: ${YELLOW}${CURRENT_MODEL}${NC}"
+if [[ "${CURRENT_MODEL}" == "ministral"* ]]; then
+    echo -e "  ${YELLOW}Recommendation: gemma3:12b has been tested with significantly better results.${NC}"
+    read -p "  Switch OLLAMA_MODEL to gemma3:12b? [Y/n]: " switch_model
+    if [[ "${switch_model}" != "n" && "${switch_model}" != "N" ]]; then
+        sed -i "s|^OLLAMA_MODEL=.*|OLLAMA_MODEL=gemma3:12b|" "${ENV_FILE}"
+        echo -e "  ${GREEN}Model set to gemma3:12b${NC}"
+        echo -e "  ${YELLOW}Make sure it's pulled on your Ollama server: ollama pull gemma3:12b${NC}"
+    fi
+else
+    echo "  Keeping current model (can be changed in dashboard Config tab)"
+fi
+
+# ---- STEP 6: UPDATE SYSTEMD & START ----
+echo ""
+echo -e "${BLUE}[6/6] Updating systemd service & starting...${NC}"
+
 if [[ -f "${SERVICE_FILE}" ]]; then
-    # Check if it still points to old classifier_api.py
-    if grep -q "classifier_api.py" "${SERVICE_FILE}"; then
-        sed -i 's|classifier_api.py|classifier_api_v2.py|g' "${SERVICE_FILE}"
-        systemctl daemon-reload
-        echo -e "  Updated ExecStart to classifier_api_v2.py"
-    else
-        echo "  Service already points to classifier_api_v2.py"
+    # Update ExecStart if still pointing to old classifier_api.py
+    if grep -q "classifier_api\.py" "${SERVICE_FILE}" && ! grep -q "classifier_api_v2\.py" "${SERVICE_FILE}"; then
+        sed -i 's|classifier_api\.py|classifier_api_v2.py|g' "${SERVICE_FILE}"
+        echo "  → ExecStart updated: classifier_api.py → classifier_api_v2.py"
     fi
-else
-    echo -e "  ${YELLOW}No systemd service file found — skip${NC}"
-fi
 
-# ---- STEP 6: CHECK MODEL ----
-echo ""
-echo -e "${BLUE}[6/7] Checking model availability...${NC}"
-
-OLLAMA_URL=$(grep "^OLLAMA_URL=" "${ENV_FILE}" 2>/dev/null | cut -d'=' -f2)
-OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}"
-TARGET_MODEL=$(grep "^OLLAMA_MODEL=" "${ENV_FILE}" 2>/dev/null | cut -d'=' -f2)
-TARGET_MODEL="${TARGET_MODEL:-gemma4:e4b}"
-
-echo "  Ollama URL: ${OLLAMA_URL}"
-echo "  Target model: ${TARGET_MODEL}"
-
-if curl -s "${OLLAMA_URL}/api/tags" 2>/dev/null | grep -q "${TARGET_MODEL}"; then
-    echo -e "  Model status: ${GREEN}AVAILABLE${NC}"
-else
-    echo -e "  Model status: ${YELLOW}NOT FOUND${NC}"
-    echo ""
-    echo "  To download the model, run on your Ollama server:"
-    echo -e "    ${BLUE}ollama pull ${TARGET_MODEL}${NC}"
-fi
-
-# ---- STEP 7: RESTART ----
-echo ""
-echo -e "${BLUE}[7/7] Restarting service...${NC}"
-
-# Create logs directory
-mkdir -p "${INSTALL_DIR}/logs"
-chmod 755 "${INSTALL_DIR}/logs"
-
-# Set permissions
-chmod 644 "${INSTALL_DIR}"/*.py 2>/dev/null || true
-
-if systemctl is-active --quiet paperless-classifier 2>/dev/null; then
-    systemctl restart paperless-classifier
+    systemctl daemon-reload
+    systemctl start "${SERVICE_NAME}"
     sleep 3
-    if systemctl is-active --quiet paperless-classifier; then
-        echo -e "  Service restarted: ${GREEN}OK${NC}"
+
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        echo -e "  ${GREEN}Service started successfully${NC}"
     else
-        echo -e "  ${RED}Service failed to start! Check logs:${NC}"
-        echo "    journalctl -u paperless-classifier -n 20"
+        echo -e "  ${RED}Service failed to start!${NC}"
+        echo ""
+        echo "  Check logs:"
+        echo "    journalctl -u ${SERVICE_NAME} -n 30 --no-pager"
+        echo ""
+        echo "  Rollback:"
+        echo "    cp ${BACKUP_DIR}/* ${PROD_DIR}/"
+        echo "    systemctl restart ${SERVICE_NAME}"
+        exit 1
     fi
 else
-    echo -e "  ${YELLOW}No running service found — start manually:${NC}"
-    echo "    python3 ${INSTALL_DIR}/classifier_api_v2.py"
+    echo -e "  ${YELLOW}No systemd service file found.${NC}"
+    echo "  Start manually: python3 ${PROD_DIR}/classifier_api_v2.py"
 fi
 
 # ---- DONE ----
 echo ""
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}Upgrade to v3 Complete!${NC}"
+echo -e "${GREEN}  Upgrade to v3 complete!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
-echo "What's new in v3:"
-echo "  • Freeform AI — no tag injection, better tag quality"
-echo "  • Smart post-processing — fuzzy match against existing Paperless data"
-echo "  • Configurable sampling — temperature, top_p, top_k via dashboard"
-echo "  • Queue dedup — duplicate documents are skipped"
-echo "  • Non-blocking I/O — polling and commits no longer block the event loop"
-echo "  • Batch caching — Paperless data cached while queue is non-empty"
+echo "What's new:"
+echo "  • Multi-model vision engine (gemma3, ministral, llama, etc.)"
+echo "  • Multi-page document analysis (configurable DPI & quality)"
+echo "  • Learning layer — fuzzy matching normalizes AI output"
+echo "  • Review tab — correct classifications, system learns"
+echo "  • Data tab — manage term mappings"
+echo "  • Config editor with live service restart"
+echo "  • Manual document processing by ID"
+echo "  • Logs viewer & debug export"
 echo ""
-echo "Backup saved to: ${BACKUP_DIR}"
-echo "Dashboard: http://<your-ip>:8001/dashboard"
+API_PORT=$(grep "^API_PORT=" "${ENV_FILE}" 2>/dev/null | cut -d'=' -f2 | tr -d "'")
+echo "Dashboard:  http://<your-ip>:${API_PORT:-8001}/dashboard"
+echo "Backup:     ${BACKUP_DIR}"
+echo ""
+echo "Old files (ministral.py, classifier_api.py) are still in ${PROD_DIR}"
+echo "but are no longer used. Safe to delete if desired."
 echo ""
 echo "If something went wrong:"
-echo "  cp ${BACKUP_DIR}/* ${INSTALL_DIR}/"
-echo "  systemctl restart paperless-classifier"
+echo "  cp ${BACKUP_DIR}/* ${PROD_DIR}/"
+echo "  systemctl restart ${SERVICE_NAME}"
