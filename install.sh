@@ -22,6 +22,15 @@ die()  { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "Run as root: sudo ./install.sh"
 [[ -f "$INSTALL_DIR/app/main.py" ]] || die "app/ not found next to install.sh. Run this from the git checkout."
 
+# --- 0. stop an existing service -------------------------------------------------------
+# Any earlier version (copied files or an older checkout) runs under the same unit name.
+if systemctl list-unit-files "$SERVICE.service" --no-legend 2>/dev/null | grep -q "$SERVICE"; then
+  if systemctl is-active --quiet "$SERVICE"; then
+    say "Stopping running $SERVICE"
+    systemctl stop "$SERVICE"
+  fi
+fi
+
 # --- 1. system packages -------------------------------------------------------------
 say "Installing system packages (python3, venv, git, poppler-utils)"
 export DEBIAN_FRONTEND=noninteractive
@@ -44,8 +53,10 @@ import_from() {
     [[ -f "$old/.env" ]] && cp "$old/.env" "$INSTALL_DIR/.env" && say "Imported .env"
     [[ -f "$old/classifier_audit.db" && ! -f "$INSTALL_DIR/classifier_audit.db" ]] \
       && cp "$old/classifier_audit.db" "$INSTALL_DIR/classifier_audit.db" && say "Imported classifier_audit.db"
+    OLD_DIR_HINT="$old"
   fi
 }
+OLD_DIR_HINT=""
 import_from "${INSTALL_DIR}.old"
 import_from "/opt/paperless-classifier"
 
@@ -99,3 +110,4 @@ else
   warn "Service did not start. Check: journalctl -u $SERVICE -n 50"
 fi
 echo "Config: $INSTALL_DIR/.env   Logs: journalctl -u $SERVICE -f   Update: sudo $INSTALL_DIR/update.sh"
+[[ -n "$OLD_DIR_HINT" ]] && echo "Old installation kept at $OLD_DIR_HINT. Remove it once the dashboard works: sudo rm -rf $OLD_DIR_HINT"
