@@ -49,10 +49,15 @@ complete `.env` with comments, and installs a systemd service that runs from the
 **Coming from the old copy-based installation** (files in `/opt/paperless-classifier` without `.git`):
 
 ```bash
-sudo mv /opt/paperless-classifier /opt/paperless-classifier.old
+sudo systemctl disable --now paperless-classifier                    # stop the old service
+sudo mv /opt/paperless-classifier /opt/paperless-classifier.old      # keeps .env and the audit database
 sudo git clone https://github.com/mwckr/paperless-ai-classifier.git /opt/paperless-classifier
-cd /opt/paperless-classifier && sudo ./install.sh     # offers to import .env and the audit database
+cd /opt/paperless-classifier && sudo ./install.sh                    # offers to import .env and the database
+sudo rm -rf /opt/paperless-classifier.old                            # once the dashboard works
 ```
+
+The installer stops a running service itself and overwrites the old systemd unit, so the first line is only
+needed if you want the old version down before you start cloning.
 
 **Proxmox:** `pve-install.sh` creates an Ollama container and an API container and runs the same installer.
 
