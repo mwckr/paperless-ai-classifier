@@ -53,7 +53,7 @@
   </div>
   <div class="card">
     <h2>Recent activity</h2>
-    <table class="table" id="recent"><tbody></tbody></table>
+    <div class="table-wrap"><table class="table stack" id="recent"><tbody></tbody></table></div>
   </div>
 </section>
 
@@ -75,10 +75,10 @@
       <button id="act-del-failed" class="danger">Delete failed</button>
       <button id="act-del-skipped" class="danger">Delete skipped</button>
     </div>
-    <table class="table" id="activity">
-      <thead><tr><th>Time</th><th>Doc</th><th>Type</th><th>Correspondent</th><th>Tags</th><th>Conf</th><th>Time</th><th>Status</th><th></th></tr></thead>
+    <div class="table-wrap"><table class="table stack" id="activity">
+      <thead><tr><th>Time</th><th>Doc</th><th>Type</th><th>Correspondent</th><th>Tags</th><th class="hide-sm">Conf</th><th class="hide-sm">Took</th><th>Status</th><th></th></tr></thead>
       <tbody></tbody>
-    </table>
+    </table></div>
     <div class="row pager"><button id="act-prev">‹ Newer</button><span id="act-page"></span><button id="act-next">Older ›</button></div>
   </div>
 </section>
@@ -94,11 +94,11 @@
         <input id="map-user" placeholder="…use this instead">
         <button id="map-add" class="primary">Add</button>
       </div>
-      <table class="table" id="mappings"><thead><tr><th>Kind</th><th>Model says</th><th>Becomes</th><th>Used</th><th></th></tr></thead><tbody></tbody></table>
+      <div class="table-wrap"><table class="table" id="mappings"><thead><tr><th>Kind</th><th>Model says</th><th>Becomes</th><th>Used</th><th></th></tr></thead><tbody></tbody></table></div>
     </div>
     <div class="card">
       <h2>Verified examples <small>used as few-shot examples when enabled</small></h2>
-      <table class="table" id="examples"><thead><tr><th>Doc</th><th>Type</th><th>Correspondent</th><th>Tags</th><th></th></tr></thead><tbody></tbody></table>
+      <div class="table-wrap"><table class="table" id="examples"><thead><tr><th>Doc</th><th>Type</th><th>Correspondent</th><th>Tags</th><th></th></tr></thead><tbody></tbody></table></div>
       <div class="row"><button id="ex-clear" class="danger">Delete all examples</button><button id="learn-reset" class="danger">Reset all learning</button></div>
     </div>
   </div>
@@ -133,7 +133,7 @@
     </div>
     <div class="card">
       <h2>Version &amp; update</h2>
-      <div id="about" class="kv"></div>
+      <div id="about"></div>
       <div class="row">
         <button id="update-btn" class="primary">Update now</button>
         <a class="button" href="/api/export/debug">Download debug export</a>

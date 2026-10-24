@@ -7,6 +7,7 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const esc = (v) => v === undefined || v === null ? '' : String(v)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const fmtTime = (iso) => iso ? new Date(iso).toLocaleString() : '';
+const fmtShort = (iso) => iso ? `<span title="${esc(fmtTime(iso))}">${esc(new Date(iso).toLocaleString(undefined, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))}</span>` : '';
 const fmtSec = (s) => (s === null || s === undefined) ? '' : (s >= 60 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s` : `${Number(s).toFixed(1)}s`);
 const pct = (v) => (v === null || v === undefined) ? '' : Math.round(v * 100) + '%';
 const tags = (arr) => (arr || []).map(t => `<span class="tag">${esc(t)}</span>`).join('') || '<span class="muted">–</span>';
@@ -41,7 +42,7 @@ function showTab(name) {
   activeTab = name;
   $$('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
   $$('.tab').forEach(t => t.classList.toggle('active', t.id === `tab-${name}`));
-  ({ activity: loadActivity, learning: loadLearning, config: loadConfig, tools: loadAbout, logs: loadLogs }[name] || (() => {}))();
+  ({ overview: refreshRecent, activity: loadActivity, learning: loadLearning, config: loadConfig, tools: loadAbout, logs: loadLogs }[name] || (() => {}))().catch?.(() => {});
   location.hash = name;
 }
 
@@ -108,10 +109,10 @@ async function refreshHealth() {
 async function refreshRecent() {
   const data = await api('/api/audit?limit=10');
   $('#recent tbody').innerHTML = data.logs.map(l => `<tr>
-    <td class="nowrap muted">${fmtTime(l.timestamp)}</td>
-    <td><strong>#${l.document_id}</strong><span class="title">${esc(l.document_title)}</span></td>
-    <td>${esc(l.document_type || '')}</td><td>${esc(l.correspondent || '')}</td><td>${tags(l.tags)}</td>
-    <td>${pct(l.confidence)}</td><td><span class="status ${esc(l.status)}">${esc(l.status)}</span></td>
+    <td class="nowrap muted c-time">${fmtShort(l.timestamp)}</td>
+    <td class="c-doc"><strong>#${l.document_id}</strong><span class="title" title="${esc(l.document_title)}">${esc(l.document_title)}</span></td>
+    <td data-label="Type">${esc(l.document_type || '')}</td><td data-label="From">${esc(l.correspondent || '')}</td><td data-label="Tags">${tags(l.tags)}</td>
+    <td class="hide-sm">${pct(l.confidence)}</td><td class="c-status"><span class="status ${esc(l.status)}">${esc(l.status)}</span></td>
   </tr>`).join('') || '<tr><td class="muted">Nothing processed yet</td></tr>';
 }
 
@@ -141,12 +142,12 @@ async function loadActivity() {
     const t = l.timing || {};
     const timeTitle = t.total_s !== undefined ? `load ${t.load_s}s · prompt ${t.prompt_s}s (${t.prompt_tokens} tok) · output ${t.eval_s}s (${t.eval_tokens} tok)` : '';
     return `<tr>
-      <td class="nowrap muted">${fmtTime(l.timestamp)}</td>
-      <td><strong>#${l.document_id}</strong><span class="title" title="${esc(l.document_title)}">${esc(l.document_title)}</span></td>
-      <td>${esc(l.document_type || '')}</td><td>${esc(l.correspondent || '')}</td><td>${tags(l.tags)}</td>
-      <td>${pct(l.confidence)}</td><td class="nowrap" title="${esc(timeTitle)}">${fmtSec(l.processing_time)}</td>
-      <td><span class="status ${esc(l.status)}" title="${esc(l.error_message || '')}">${esc(l.status)}</span>${l.error_message && l.status !== 'completed' ? `<div class="muted" style="font-size:11px">${esc(l.error_message)}</div>` : ''}</td>
-      <td class="nowrap">
+      <td class="nowrap muted c-time">${fmtShort(l.timestamp)}</td>
+      <td class="c-doc"><strong>#${l.document_id}</strong><span class="title" title="${esc(l.document_title)}">${esc(l.document_title)}</span></td>
+      <td data-label="Type">${esc(l.document_type || '')}</td><td data-label="From">${esc(l.correspondent || '')}</td><td data-label="Tags">${tags(l.tags)}</td>
+      <td class="hide-sm">${pct(l.confidence)}</td><td class="nowrap hide-sm" title="${esc(timeTitle)}">${fmtSec(l.processing_time)}</td>
+      <td class="c-status"><span class="status ${esc(l.status)}" title="${esc(l.error_message || '')}">${esc(l.status)}</span>${l.error_message && l.status !== 'completed' ? `<div class="muted err">${esc(l.error_message)}</div>` : ''}</td>
+      <td class="actions">
         <button class="small" data-act="details" data-id="${l.id}">Details</button>
         ${l.status === 'completed' ? `<button class="small" data-act="correct" data-id="${l.id}">Correct</button>` : ''}
         <button class="small" data-act="redo" data-doc="${l.document_id}" title="Re-analyze and overwrite">Redo</button>
@@ -203,12 +204,12 @@ async function showCorrect(id) {
   const aiTags = l.tags || [];
   openModal(`<h2>Correct #${l.document_id} <small class="muted">${esc(l.document_title)}</small></h2>
     <table class="cmp"><thead><tr><th style="width:18%">Field</th><th style="width:24%">Model said</th><th style="width:24%">Paperless now</th><th>Your correction</th><th style="width:70px">Write</th></tr></thead><tbody>
-      <tr><td>Type</td><td>${esc(l.document_type || '')}</td><td>${pd ? esc(pd.document_type || '–') : '?'}</td>
-          <td><input id="c-type" list="dl-types" value="${esc(pd && pd.document_type || l.document_type || '')}"></td><td><input type="checkbox" id="c-type-sync" checked></td></tr>
-      <tr><td>Correspondent</td><td>${esc(l.correspondent || '')}</td><td>${pd ? esc(pd.correspondent || '–') : '?'}</td>
-          <td><input id="c-corr" list="dl-correspondents" value="${esc(pd && pd.correspondent || l.correspondent || '')}"></td><td><input type="checkbox" id="c-corr-sync" checked></td></tr>
-      <tr><td>Tags</td><td>${tags(aiTags)}</td><td>${pd ? tags(pd.tags) : '?'}</td>
-          <td><input id="c-tags" list="dl-tags" value="${esc((pd ? pd.tags : aiTags).join(', '))}" placeholder="comma separated"></td><td><input type="checkbox" id="c-tags-sync" checked></td></tr>
+      <tr><td class="f">Type</td><td data-label="Model said">${esc(l.document_type || '')}</td><td data-label="Paperless now">${pd ? esc(pd.document_type || '–') : '?'}</td>
+          <td data-label="Your correction"><input id="c-type" list="dl-types" value="${esc(pd && pd.document_type || l.document_type || '')}"></td><td class="w"><label><input type="checkbox" id="c-type-sync" checked> <span class="sm-only">write to Paperless</span></label></td></tr>
+      <tr><td class="f">Correspondent</td><td data-label="Model said">${esc(l.correspondent || '')}</td><td data-label="Paperless now">${pd ? esc(pd.correspondent || '–') : '?'}</td>
+          <td data-label="Your correction"><input id="c-corr" list="dl-correspondents" value="${esc(pd && pd.correspondent || l.correspondent || '')}"></td><td class="w"><label><input type="checkbox" id="c-corr-sync" checked> <span class="sm-only">write to Paperless</span></label></td></tr>
+      <tr><td class="f">Tags</td><td data-label="Model said">${tags(aiTags)}</td><td data-label="Paperless now">${pd ? tags(pd.tags) : '?'}</td>
+          <td data-label="Your correction"><input id="c-tags" list="dl-tags" value="${esc((pd ? pd.tags : aiTags).join(', '))}" placeholder="comma separated"></td><td class="w"><label><input type="checkbox" id="c-tags-sync" checked> <span class="sm-only">write to Paperless</span></label></td></tr>
     </tbody></table>
     <p class="muted">Changed type and correspondent become term mappings (applied to future answers). The tag list, when written, replaces the document's tags.</p>
     <div class="row"><button class="primary" id="c-save">Save</button><button id="c-cancel">Cancel</button></div>`);
