@@ -38,6 +38,24 @@ LOGS_DIR.mkdir(exist_ok=True)
 LOG_RETENTION_DAYS = 7
 LOG_MAX_SIZE_MB = 50
 
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(float(os.getenv(key, "") or default))
+    except ValueError:
+        return default
+
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.getenv(key, "") or default)
+    except ValueError:
+        return default
+
+def _env_bool(key: str, default: bool) -> bool:
+    raw = os.getenv(key)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
 # Configuration from .env
 def get_config():
     load_dotenv(ENV_FILE, override=True)
@@ -45,19 +63,37 @@ def get_config():
         "PAPERLESS_URL": os.getenv("PAPERLESS_URL", "http://localhost:8000"),
         "PAPERLESS_TOKEN": os.getenv("PAPERLESS_TOKEN", ""),
         "OLLAMA_URL": os.getenv("OLLAMA_URL", "http://localhost:11434"),
-        "OLLAMA_MODEL": os.getenv("OLLAMA_MODEL", "gemma3:12b"),
-        "OLLAMA_THREADS": int(os.getenv("OLLAMA_THREADS", "10")),
-        "MAX_PAGES": int(os.getenv("MAX_PAGES", "3")),
-        "IMAGE_MAX_SIZE": int(os.getenv("IMAGE_MAX_SIZE", "1024")),
-        "IMAGE_QUALITY": int(os.getenv("IMAGE_QUALITY", "85")),
-        "OLLAMA_TIMEOUT": int(os.getenv("OLLAMA_TIMEOUT", "600")),
-        "AUTO_COMMIT": os.getenv("AUTO_COMMIT", "true").lower() == "true",
-        "GENERATE_EXPLANATIONS": os.getenv("GENERATE_EXPLANATIONS", "false").lower() == "true",
-        "LEARNING_ENABLED": os.getenv("LEARNING_ENABLED", "true").lower() == "true",
-        "FEW_SHOT_ENABLED": os.getenv("FEW_SHOT_ENABLED", "false").lower() == "true",
-        "INJECT_EXISTING_TYPES": os.getenv("INJECT_EXISTING_TYPES", "false").lower() == "true",
-        "INJECT_EXISTING_TAGS": os.getenv("INJECT_EXISTING_TAGS", "true").lower() == "true",
-        "FUZZY_MATCH_THRESHOLD": float(os.getenv("FUZZY_MATCH_THRESHOLD", "0.80")),
+        "OLLAMA_MODEL": os.getenv("OLLAMA_MODEL", "gemma4:e4b"),
+        # 0 = let Ollama pick (physical core count). Oversubscribing threads slows CPU inference.
+        "OLLAMA_THREADS": _env_int("OLLAMA_THREADS", 0),
+        "OLLAMA_NUM_CTX": _env_int("OLLAMA_NUM_CTX", 4096),
+        "OLLAMA_NUM_PREDICT": _env_int("OLLAMA_NUM_PREDICT", 512),
+        "OLLAMA_THINK": _env_bool("OLLAMA_THINK", False),
+        "OLLAMA_STRUCTURED_OUTPUT": _env_bool("OLLAMA_STRUCTURED_OUTPUT", True),
+        "OLLAMA_KEEP_ALIVE": os.getenv("OLLAMA_KEEP_ALIVE", "5m") or "5m",
+        "OLLAMA_UNLOAD_WHEN_IDLE": _env_bool("OLLAMA_UNLOAD_WHEN_IDLE", False),
+        "MAX_PAGES": _env_int("MAX_PAGES", 3),
+        "IMAGE_MAX_SIZE": _env_int("IMAGE_MAX_SIZE", 1024),
+        "IMAGE_QUALITY": _env_int("IMAGE_QUALITY", 85),
+        "IMAGE_GRAYSCALE": _env_bool("IMAGE_GRAYSCALE", False),
+        # off by default: page images carry the layout (letterhead vs. table vs. footer) that flat OCR text loses
+        "OCR_TEXT_MODE": (os.getenv("OCR_TEXT_MODE", "off") or "off").strip().lower(),
+        "OCR_TEXT_CHARS": _env_int("OCR_TEXT_CHARS", 2000),
+        "OLLAMA_TIMEOUT": _env_int("OLLAMA_TIMEOUT", 600),
+        "PDF_RENDER_TIMEOUT": _env_int("PDF_RENDER_TIMEOUT", 120),
+        "AUTO_COMMIT": _env_bool("AUTO_COMMIT", True),
+        "OVERWRITE_EXISTING": _env_bool("OVERWRITE_EXISTING", False),
+        "TAGS_MODE": (os.getenv("TAGS_MODE", "merge") or "merge").strip().lower(),
+        "GENERATE_EXPLANATIONS": _env_bool("GENERATE_EXPLANATIONS", False),
+        "LEARNING_ENABLED": _env_bool("LEARNING_ENABLED", True),
+        "FEW_SHOT_ENABLED": _env_bool("FEW_SHOT_ENABLED", False),
+        "INJECT_EXISTING_TYPES": _env_bool("INJECT_EXISTING_TYPES", True),
+        "INJECT_EXISTING_TAGS": _env_bool("INJECT_EXISTING_TAGS", True),
+        "INJECT_EXISTING_CORRESPONDENTS": _env_bool("INJECT_EXISTING_CORRESPONDENTS", True),
+        "PROMPT_TYPE_LIMIT": _env_int("PROMPT_TYPE_LIMIT", 50),
+        "PROMPT_CORRESPONDENT_LIMIT": _env_int("PROMPT_CORRESPONDENT_LIMIT", 60),
+        "PROMPT_TAG_LIMIT": _env_int("PROMPT_TAG_LIMIT", 80),
+        "FUZZY_MATCH_THRESHOLD": _env_float("FUZZY_MATCH_THRESHOLD", 0.80),
         "API_HOST": os.getenv("API_HOST", "0.0.0.0"),
         "API_PORT": int(os.getenv("API_PORT", "8001")),
     }
@@ -267,7 +303,8 @@ logger = logging.getLogger(__name__)
 
 # Queue for document processing
 document_queue: asyncio.Queue = None
-_pending_set: set = set()  # O(1) dedup lookup
+_pending_set: set = set()  # O(1) dedup lookup; a doc stays here until processing finished
+_force_overwrite_ids: set = set()  # docs queued via re-analyze: overwrite existing type/correspondent
 queue_status: Dict = {
     "processing": False,
     "current_doc": None,
@@ -306,7 +343,9 @@ class MappingCreate(BaseModel):
 def setup_model():
     """Import and configure the vision model module"""
     import sys
-    sys.path.insert(0, str(Path(__file__).parent))
+    here = str(Path(__file__).parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
     cfg = get_config()
     import gemma4 as model_module
     model_module.init_config(cfg)
@@ -600,30 +639,42 @@ async def poll_for_new_documents():
             cfg = get_config()
             headers = {"Authorization": f"Token {cfg['PAPERLESS_TOKEN']}"}
             
-            resp = await asyncio.to_thread(
-                requests.get,
-                f"{cfg['PAPERLESS_URL']}/api/documents/",
-                headers=headers,
-                params={"ordering": "-id", "page_size": 10},
-                timeout=10
-            )
+            # Page through newest-first until we reach an already seen id, so a
+            # bulk import of more than one page is not skipped.
+            new_docs = []
+            page = 1
+            while page <= 10:
+                resp = await asyncio.to_thread(
+                    requests.get,
+                    f"{cfg['PAPERLESS_URL']}/api/documents/",
+                    headers=headers,
+                    params={"ordering": "-id", "page_size": 50, "page": page,
+                            "fields": "id,title,document_type"},
+                    timeout=10
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"Polling: Paperless returned {resp.status_code}")
+                    break
+                data = resp.json()
+                docs = data.get("results", [])
+                fresh = [d for d in docs if d["id"] > last_seen_doc_id]
+                new_docs.extend(fresh)
+                if len(fresh) < len(docs) or not data.get("next"):
+                    break
+                page += 1
             
-            if resp.status_code == 200:
-                docs = resp.json().get("results", [])
-                new_docs = [d for d in docs if d["id"] > last_seen_doc_id]
+            if new_docs:
+                logger.info(f"Found {len(new_docs)} new document(s)")
+                for doc in reversed(new_docs):
+                    doc_id = doc["id"]
+                    # Dedup: skip if already queued or being processed
+                    if doc_id in _pending_set:
+                        continue
+                    await document_queue.put(doc_id)
+                    _pending_set.add(doc_id)
+                    logger.info(f"Queued new document {doc_id}: {doc.get('title', 'untitled')}")
                 
-                if new_docs:
-                    logger.info(f"Found {len(new_docs)} new document(s)")
-                    for doc in reversed(new_docs):
-                        doc_id = doc["id"]
-                        # Dedup: skip if already in queue
-                        if doc_id in _pending_set:
-                            continue
-                        await document_queue.put(doc_id)
-                        _pending_set.add(doc_id)
-                        logger.info(f"Queued new document {doc_id}: {doc.get('title', 'untitled')}")
-                    
-                    last_seen_doc_id = max(d["id"] for d in new_docs)
+                last_seen_doc_id = max(d["id"] for d in new_docs)
         
         except asyncio.CancelledError:
             break
@@ -641,34 +692,29 @@ async def process_queue():
             doc_id = await document_queue.get()
             cfg = get_config()
             model = setup_model()
-            
-            # Dedup: skip if already processing or recently processed
-            if queue_status["current_doc"] == doc_id:
-                document_queue.task_done()
-                continue
+            force_overwrite = doc_id in _force_overwrite_ids
+            _force_overwrite_ids.discard(doc_id)
             
             queue_status["processing"] = True
             queue_status["current_doc"] = doc_id
             queue_status["started_at"] = datetime.now().isoformat()
             queue_status["queue_size"] = document_queue.qsize()
             
-            _pending_set.discard(doc_id)
-            
-            # Get document title
+            # Fetch metadata once; it is reused for the title, the OCR text and the update
+            meta = None
             try:
                 meta = await asyncio.to_thread(model.get_document_metadata, doc_id)
-                doc_title = meta.get("title", f"Document {doc_id}") if meta else f"Document {doc_id}"
-                queue_status["current_title"] = doc_title
             except Exception:
-                doc_title = f"Document {doc_id}"
-                queue_status["current_title"] = doc_title
+                meta = None
+            doc_title = (meta or {}).get("title") or f"Document {doc_id}"
+            queue_status["current_title"] = doc_title
             
             logger.info(f"Processing document {doc_id}: {doc_title}")
             log_to_audit(doc_id, doc_title, status="processing")
             
             try:
                 result = await asyncio.to_thread(
-                    model.process_document, doc_id, cfg["LEARNING_ENABLED"]
+                    model.process_document, doc_id, cfg["LEARNING_ENABLED"], meta
                 )
                 
                 if result["success"]:
@@ -677,7 +723,8 @@ async def process_queue():
                     committed = False
                     if cfg["AUTO_COMMIT"]:
                         committed = await asyncio.to_thread(
-                            model.update_document_in_paperless, doc_id, result
+                            model.update_document_in_paperless, doc_id, result, meta,
+                            True if force_overwrite else None
                         )
                         if committed:
                             logger.info(f"Document {doc_id} committed to Paperless")
@@ -714,6 +761,7 @@ async def process_queue():
                 log_to_audit(doc_id, doc_title, status="failed", error_message=str(e))
             
             finally:
+                _pending_set.discard(doc_id)
                 queue_status["processing"] = False
                 queue_status["current_doc"] = None
                 queue_status["current_title"] = None
@@ -721,10 +769,13 @@ async def process_queue():
                 queue_status["queue_size"] = document_queue.qsize()
                 document_queue.task_done()
                 
-                # Invalidate Paperless cache when queue drains
+                # Queue drained: drop the Paperless cache and, if configured,
+                # free the RAM the model occupies until the next document arrives.
                 if document_queue.empty():
                     model.invalidate_cache()
                     logger.debug("Queue empty — Paperless cache invalidated")
+                    if cfg.get("OLLAMA_UNLOAD_WHEN_IDLE"):
+                        await asyncio.to_thread(model.unload_model)
                 
         except asyncio.CancelledError:
             logger.info("Queue processor stopped")
@@ -1231,6 +1282,14 @@ DASHBOARD_HTML = '''
     </div>
     
     <script>
+        // Escape untrusted text (model output, document titles) before innerHTML
+        function esc(value) {
+            if (value === undefined || value === null) return '';
+            return String(value)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+        
         function showTab(tabName) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -1272,7 +1331,7 @@ DASHBOARD_HTML = '''
             // Display AI data
             document.getElementById('edit-ai-type').textContent = aiType || '-';
             document.getElementById('edit-ai-corr').textContent = aiCorr || '-';
-            document.getElementById('edit-ai-tags').innerHTML = (aiTags || []).map(t => `<span class="tag">${t}</span>`).join(' ') || '-';
+            document.getElementById('edit-ai-tags').innerHTML = (aiTags || []).map(t => `<span class="tag">${esc(t)}</span>`).join(' ') || '-';
             
             // Pre-fill correction fields with AI data
             document.getElementById('edit-type').value = aiType || '';
@@ -1288,9 +1347,9 @@ DASHBOARD_HTML = '''
                     currentEditData.paperless = data.document;
                     const pd = data.document;
                     document.getElementById('edit-paperless-data').innerHTML = `
-                        <div><strong>Type:</strong> ${pd.document_type || '<em>not set</em>'}</div>
-                        <div><strong>Correspondent:</strong> ${pd.correspondent || '<em>not set</em>'}</div>
-                        <div><strong>Tags:</strong> ${pd.tags.length ? pd.tags.join(', ') : '<em>none</em>'}</div>
+                        <div><strong>Type:</strong> ${pd.document_type ? esc(pd.document_type) : '<em>not set</em>'}</div>
+                        <div><strong>Correspondent:</strong> ${pd.correspondent ? esc(pd.correspondent) : '<em>not set</em>'}</div>
+                        <div><strong>Tags:</strong> ${pd.tags.length ? esc(pd.tags.join(', ')) : '<em>none</em>'}</div>
                     `;
                 } else {
                     document.getElementById('edit-paperless-data').innerHTML = '<em>Could not fetch Paperless data</em>';
@@ -1420,20 +1479,20 @@ DASHBOARD_HTML = '''
                 if (data.logs && data.logs.length > 0) {
                     tbody.innerHTML = data.logs.map(log => {
                         const time = new Date(log.timestamp).toLocaleString();
-                        const tags = (log.tags || []).slice(0, 3).map(t => `<span class="tag">${t}</span>`).join('');
-                        const statusClass = 'status-' + log.status;
+                        const tags = (log.tags || []).slice(0, 3).map(t => `<span class="tag">${esc(t)}</span>`).join('');
+                        const statusClass = 'status-' + esc(log.status);
                         const conf = log.confidence ? Math.round(log.confidence * 100) + '%' : '-';
                         const explanation = log.explanation ? escapeHtml(log.explanation).substring(0, 300) : '';
                         
                         let row = `<tr>
                             <td style="white-space:nowrap">${time}</td>
                             <td>${log.document_id}</td>
-                            <td>${(log.document_title || '-').substring(0, 30)}</td>
-                            <td>${log.document_type || '-'}</td>
-                            <td>${log.correspondent || '-'}</td>
+                            <td>${esc((log.document_title || '-').substring(0, 30))}</td>
+                            <td>${esc(log.document_type || '-')}</td>
+                            <td>${esc(log.correspondent || '-')}</td>
                             <td>${tags || '-'}</td>
                             <td>${conf}</td>
-                            <td><span class="status-badge ${statusClass}">${log.status}</span></td>
+                            <td><span class="status-badge ${statusClass}">${esc(log.status)}</span></td>
                             <td>
                                 <button onclick="reanalyze(${log.document_id})" class="edit-btn" title="Re-analyze">↻</button>
                                 <button onclick="deleteEntry(${log.id})" class="delete-btn" title="Delete">×</button>
@@ -1458,22 +1517,29 @@ DASHBOARD_HTML = '''
                 
                 if (completedLogs.length > 0) {
                     tbody.innerHTML = completedLogs.map(log => {
-                        const tags = (log.tags || []).map(t => `<span class="tag">${t}</span>`).join('');
+                        const tags = (log.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join('');
                         const conf = log.confidence ? Math.round(log.confidence * 100) + '%' : '-';
-                        const tagsArr = JSON.stringify(log.tags || []);
+                        const tagsArr = esc(JSON.stringify(log.tags || []));
                         
                         return `<tr>
-                            <td><strong>#${log.document_id}</strong><br><small>${(log.document_title || '').substring(0, 40)}</small></td>
-                            <td>${log.document_type || '-'}</td>
-                            <td>${log.correspondent || '-'}</td>
+                            <td><strong>#${log.document_id}</strong><br><small>${esc((log.document_title || '').substring(0, 40))}</small></td>
+                            <td>${esc(log.document_type || '-')}</td>
+                            <td>${esc(log.correspondent || '-')}</td>
                             <td>${tags || '-'}</td>
                             <td>${conf}</td>
                             <td>
-                                <button class="edit-btn" onclick='showEditModal(${log.id}, ${log.document_id}, "${(log.document_type || '').replace(/"/g, '\\"')}", "${(log.correspondent || '').replace(/"/g, '\\"')}", ${tagsArr})'>Correct</button>
+                                <button class="edit-btn correct-btn" data-audit-id="${log.id}" data-doc-id="${log.document_id}" data-type="${esc(log.document_type || '')}" data-corr="${esc(log.correspondent || '')}" data-tags="${tagsArr}">Correct</button>
                                 <button class="edit-btn" onclick="reanalyze(${log.document_id})" title="Re-analyze">↻ Redo</button>
                             </td>
                         </tr>`;
                     }).join('');
+                    tbody.querySelectorAll('.correct-btn').forEach(btn => {
+                        btn.addEventListener('click', () => {
+                            let tags = [];
+                            try { tags = JSON.parse(btn.dataset.tags || '[]'); } catch (e) {}
+                            showEditModal(parseInt(btn.dataset.auditId, 10), parseInt(btn.dataset.docId, 10), btn.dataset.type, btn.dataset.corr, tags);
+                        });
+                    });
                 } else {
                     tbody.innerHTML = '<tr><td colspan="6" style="color: #888;">No completed classifications to review</td></tr>';
                 }
@@ -1488,10 +1554,10 @@ DASHBOARD_HTML = '''
                 if (data.mappings && data.mappings.length > 0) {
                     tbody.innerHTML = data.mappings.map(m => {
                         return `<tr>
-                            <td><span class="mapping-type ${m.term_type}">${m.term_type}</span></td>
-                            <td>${m.ai_term}</td>
+                            <td><span class="mapping-type ${esc(m.term_type)}">${esc(m.term_type)}</span></td>
+                            <td>${esc(m.ai_term)}</td>
                             <td>→</td>
-                            <td><strong>${m.approved_term}</strong></td>
+                            <td><strong>${esc(m.approved_term)}</strong></td>
                             <td>${m.times_used}×</td>
                             <td><button onclick="deleteMapping(${m.id})" class="delete-btn">×</button></td>
                         </tr>`;
@@ -1512,12 +1578,12 @@ DASHBOARD_HTML = '''
                 
                 if (data.examples && data.examples.length > 0) {
                     tbody.innerHTML = data.examples.map(ex => {
-                        const tags = (ex.tags || []).slice(0, 4).map(t => `<span class="tag">${t}</span>`).join(' ');
+                        const tags = (ex.tags || []).slice(0, 4).map(t => `<span class="tag">${esc(t)}</span>`).join(' ');
                         const verified = ex.user_verified ? '✓' : '-';
                         return `<tr>
-                            <td><strong>#${ex.document_id}</strong><br><small>${(ex.document_title || '').substring(0, 30)}</small></td>
-                            <td>${ex.document_type || '-'}</td>
-                            <td>${ex.correspondent || '-'}</td>
+                            <td><strong>#${ex.document_id}</strong><br><small>${esc((ex.document_title || '').substring(0, 30))}</small></td>
+                            <td>${esc(ex.document_type || '-')}</td>
+                            <td>${esc(ex.correspondent || '-')}</td>
                             <td>${tags || '-'}</td>
                             <td style="color: ${ex.user_verified ? '#00ff88' : '#888'}">${verified}</td>
                         </tr>`;
@@ -1562,24 +1628,40 @@ DASHBOARD_HTML = '''
                     { key: 'PAPERLESS_TOKEN', label: 'Paperless Token', type: 'password' },
                     { key: 'OLLAMA_URL', label: 'Ollama URL' },
                     { key: 'OLLAMA_MODEL', label: 'Model', type: ollamaModels.length ? 'model-select' : 'text' },
-                    { key: 'OLLAMA_TEMPERATURE', label: 'Temperature', placeholder: 'model default' },
+                    { key: 'OLLAMA_TEMPERATURE', label: 'Temperature', placeholder: 'model default (0.1 recommended)' },
                     { key: 'OLLAMA_TOP_P', label: 'Top P', placeholder: 'model default' },
                     { key: 'OLLAMA_TOP_K', label: 'Top K', placeholder: 'model default' },
+                    { key: 'OLLAMA_THREADS', label: 'CPU Threads (0 = auto)' },
+                    { key: 'OLLAMA_NUM_CTX', label: 'Context Window (tokens)' },
+                    { key: 'OLLAMA_NUM_PREDICT', label: 'Max Output Tokens' },
+                    { key: 'OLLAMA_THINK', label: 'Model Thinking', type: 'select', options: ['false', 'true'] },
+                    { key: 'OLLAMA_STRUCTURED_OUTPUT', label: 'JSON Schema Output', type: 'select', options: ['true', 'false'] },
+                    { key: 'OLLAMA_KEEP_ALIVE', label: 'Keep Model Loaded', placeholder: '5m' },
+                    { key: 'OLLAMA_UNLOAD_WHEN_IDLE', label: 'Unload When Queue Empty', type: 'select', options: ['false', 'true'] },
+                    { key: 'OLLAMA_TIMEOUT', label: 'Ollama Timeout (sec)' },
+                    { key: 'OCR_TEXT_MODE', label: 'Paperless OCR Text (off recommended)', type: 'select', options: ['off', 'hint', 'only'] },
+                    { key: 'OCR_TEXT_CHARS', label: 'OCR Text Chars' },
                     { key: 'MAX_PAGES', label: 'Max Pages' },
                     { key: 'IMAGE_MAX_SIZE', label: 'Image Max Size (px)' },
-                    { key: 'IMAGE_QUALITY', label: 'Image Quality (75-100)' },
-                    { key: 'OLLAMA_TIMEOUT', label: 'Ollama Timeout (sec)' },
+                    { key: 'IMAGE_QUALITY', label: 'Image Quality (30-100)' },
+                    { key: 'IMAGE_GRAYSCALE', label: 'Grayscale Images', type: 'select', options: ['false', 'true'] },
                     { key: 'AUTO_COMMIT', label: 'Auto Commit', type: 'select', options: ['true', 'false'] },
+                    { key: 'OVERWRITE_EXISTING', label: 'Overwrite Existing Type/Correspondent', type: 'select', options: ['false', 'true'] },
+                    { key: 'TAGS_MODE', label: 'Tags', type: 'select', options: ['merge', 'replace'] },
                     { key: 'LEARNING_ENABLED', label: 'Learning', type: 'select', options: ['true', 'false'] },
                     { key: 'FEW_SHOT_ENABLED', label: 'Few-Shot Examples', type: 'select', options: ['false', 'true'] },
                     { key: 'INJECT_EXISTING_TAGS', label: 'Inject Existing Tags', type: 'select', options: ['true', 'false'] },
-                    { key: 'INJECT_EXISTING_TYPES', label: 'Inject Doc Types', type: 'select', options: ['false', 'true'] },
+                    { key: 'INJECT_EXISTING_TYPES', label: 'Inject Doc Types', type: 'select', options: ['true', 'false'] },
+                    { key: 'INJECT_EXISTING_CORRESPONDENTS', label: 'Inject Correspondents', type: 'select', options: ['true', 'false'] },
+                    { key: 'PROMPT_TAG_LIMIT', label: 'Tags in Prompt (max)' },
+                    { key: 'PROMPT_CORRESPONDENT_LIMIT', label: 'Correspondents in Prompt (max)' },
+                    { key: 'PROMPT_TYPE_LIMIT', label: 'Doc Types in Prompt (max)' },
                     { key: 'FUZZY_MATCH_THRESHOLD', label: 'Fuzzy Match Threshold' },
                     { key: 'GENERATE_EXPLANATIONS', label: 'Explanations', type: 'select', options: ['false', 'true'] },
                 ];
                 
                 form.innerHTML = items.map(item => {
-                    const value = data[item.key] || '';
+                    const value = (data[item.key] === undefined || data[item.key] === null) ? '' : esc(String(data[item.key]));
                     if (item.type === 'model-select') {
                         const opts = ollamaModels.map(m => `<option value="${m}" ${m === value ? 'selected' : ''}>${m}</option>`).join('');
                         return `<div class="config-item"><label>${item.label}</label><select id="config-${item.key}">${opts}</select></div>`;
@@ -1593,7 +1675,12 @@ DASHBOARD_HTML = '''
         }
         
         async function saveConfig() {
-            const keys = ['PAPERLESS_URL', 'PAPERLESS_TOKEN', 'OLLAMA_URL', 'OLLAMA_MODEL', 'OLLAMA_TEMPERATURE', 'OLLAMA_TOP_P', 'OLLAMA_TOP_K', 'MAX_PAGES', 'IMAGE_MAX_SIZE', 'IMAGE_QUALITY', 'OLLAMA_TIMEOUT', 'AUTO_COMMIT', 'LEARNING_ENABLED', 'FEW_SHOT_ENABLED', 'INJECT_EXISTING_TAGS', 'INJECT_EXISTING_TYPES', 'FUZZY_MATCH_THRESHOLD', 'GENERATE_EXPLANATIONS'];
+            const keys = ['PAPERLESS_URL', 'PAPERLESS_TOKEN', 'OLLAMA_URL', 'OLLAMA_MODEL', 'OLLAMA_TEMPERATURE', 'OLLAMA_TOP_P', 'OLLAMA_TOP_K',
+                'OLLAMA_THREADS', 'OLLAMA_NUM_CTX', 'OLLAMA_NUM_PREDICT', 'OLLAMA_THINK', 'OLLAMA_STRUCTURED_OUTPUT', 'OLLAMA_KEEP_ALIVE', 'OLLAMA_UNLOAD_WHEN_IDLE',
+                'OLLAMA_TIMEOUT', 'OCR_TEXT_MODE', 'OCR_TEXT_CHARS', 'MAX_PAGES', 'IMAGE_MAX_SIZE', 'IMAGE_QUALITY', 'IMAGE_GRAYSCALE',
+                'AUTO_COMMIT', 'OVERWRITE_EXISTING', 'TAGS_MODE', 'LEARNING_ENABLED', 'FEW_SHOT_ENABLED',
+                'INJECT_EXISTING_TAGS', 'INJECT_EXISTING_TYPES', 'INJECT_EXISTING_CORRESPONDENTS',
+                'PROMPT_TAG_LIMIT', 'PROMPT_CORRESPONDENT_LIMIT', 'PROMPT_TYPE_LIMIT', 'FUZZY_MATCH_THRESHOLD', 'GENERATE_EXPLANATIONS'];
             for (const key of keys) {
                 const el = document.getElementById(`config-${key}`);
                 if (el) await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ key, value: el.value }) });
@@ -1843,7 +1930,7 @@ async def get_queue():
         "current_title": queue_status["current_title"],
         "started_at": queue_status["started_at"],
         "queue_size": document_queue.qsize() if document_queue else 0,
-        "pending": sorted(_pending_set)
+        "pending": sorted(d for d in _pending_set if d != queue_status["current_doc"])
     }
 
 @app.get("/api/stats")
@@ -1871,9 +1958,13 @@ async def get_config_api():
 _ALLOWED_CONFIG_KEYS = {
     "PAPERLESS_URL", "PAPERLESS_TOKEN", "OLLAMA_URL", "OLLAMA_MODEL",
     "OLLAMA_THREADS", "OLLAMA_TEMPERATURE", "OLLAMA_TOP_P", "OLLAMA_TOP_K",
-    "MAX_PAGES", "IMAGE_MAX_SIZE", "IMAGE_QUALITY", "OLLAMA_TIMEOUT",
-    "AUTO_COMMIT", "GENERATE_EXPLANATIONS", "LEARNING_ENABLED",
-    "FEW_SHOT_ENABLED", "INJECT_EXISTING_TAGS", "INJECT_EXISTING_TYPES", "FUZZY_MATCH_THRESHOLD",
+    "OLLAMA_NUM_CTX", "OLLAMA_NUM_PREDICT", "OLLAMA_THINK", "OLLAMA_STRUCTURED_OUTPUT",
+    "OLLAMA_KEEP_ALIVE", "OLLAMA_UNLOAD_WHEN_IDLE",
+    "MAX_PAGES", "IMAGE_MAX_SIZE", "IMAGE_QUALITY", "IMAGE_GRAYSCALE", "OLLAMA_TIMEOUT",
+    "OCR_TEXT_MODE", "OCR_TEXT_CHARS",
+    "AUTO_COMMIT", "OVERWRITE_EXISTING", "TAGS_MODE", "GENERATE_EXPLANATIONS", "LEARNING_ENABLED",
+    "FEW_SHOT_ENABLED", "INJECT_EXISTING_TAGS", "INJECT_EXISTING_TYPES", "INJECT_EXISTING_CORRESPONDENTS",
+    "PROMPT_TYPE_LIMIT", "PROMPT_CORRESPONDENT_LIMIT", "PROMPT_TAG_LIMIT", "FUZZY_MATCH_THRESHOLD",
     "API_HOST", "API_PORT", "POLL_INTERVAL",
 }
 
@@ -1884,7 +1975,10 @@ async def update_config(update: ConfigUpdate):
     # Never write back the redacted placeholder
     if update.key == "PAPERLESS_TOKEN" and update.value == "***REDACTED***":
         return {"status": "skipped", "key": update.key, "reason": "redacted value unchanged"}
-    set_key(str(ENV_FILE), update.key, update.value, quote_mode="never")
+    value = update.value.strip()
+    if "\n" in value or "\r" in value:
+        raise HTTPException(status_code=400, detail="Config values must be a single line")
+    set_key(str(ENV_FILE), update.key, value, quote_mode="never")
     return {"status": "updated", "key": update.key}
 
 @app.post("/api/restart")
@@ -2126,7 +2220,11 @@ async def get_paperless_doc(doc_id: int):
 # Re-analyze endpoint
 @app.post("/api/reanalyze/{doc_id}")
 async def reanalyze_document(doc_id: int):
-    """Re-queue a document for analysis"""
+    """Re-queue a document for analysis. An explicit re-analysis replaces the
+    document type and correspondent even when OVERWRITE_EXISTING is false."""
+    _force_overwrite_ids.add(doc_id)
+    if doc_id in _pending_set:
+        return {"status": "already_queued", "document_id": doc_id}
     await document_queue.put(doc_id)
     _pending_set.add(doc_id)
     logger.info(f"Document {doc_id} queued for re-analysis")
@@ -2199,6 +2297,18 @@ def generate_debug_export() -> Path:
         "fuzzy_match_threshold": cfg.get("FUZZY_MATCH_THRESHOLD", 0.80),
         "generate_explanations": cfg.get("GENERATE_EXPLANATIONS", False),
         "max_pages": cfg["MAX_PAGES"],
+        "image_max_size": cfg.get("IMAGE_MAX_SIZE"),
+        "image_grayscale": cfg.get("IMAGE_GRAYSCALE"),
+        "ocr_text_mode": cfg.get("OCR_TEXT_MODE"),
+        "ocr_text_chars": cfg.get("OCR_TEXT_CHARS"),
+        "ollama_num_ctx": cfg.get("OLLAMA_NUM_CTX"),
+        "ollama_num_predict": cfg.get("OLLAMA_NUM_PREDICT"),
+        "ollama_think": cfg.get("OLLAMA_THINK"),
+        "ollama_structured_output": cfg.get("OLLAMA_STRUCTURED_OUTPUT"),
+        "ollama_keep_alive": cfg.get("OLLAMA_KEEP_ALIVE"),
+        "ollama_unload_when_idle": cfg.get("OLLAMA_UNLOAD_WHEN_IDLE"),
+        "overwrite_existing": cfg.get("OVERWRITE_EXISTING"),
+        "tags_mode": cfg.get("TAGS_MODE"),
     }
     
     # Service status
@@ -2213,7 +2323,9 @@ def generate_debug_export() -> Path:
     # Health check
     health = {"paperless": "unknown", "ollama": "unknown"}
     try:
-        resp = requests.get(f"{cfg['PAPERLESS_URL']}/api/documents/", timeout=5)
+        resp = requests.get(f"{cfg['PAPERLESS_URL']}/api/documents/",
+                            headers={"Authorization": f"Token {cfg['PAPERLESS_TOKEN']}"},
+                            params={"page_size": 1}, timeout=5)
         health["paperless"] = "healthy" if resp.status_code == 200 else f"error_{resp.status_code}"
     except Exception as e:
         health["paperless"] = f"unreachable: {str(e)[:50]}"

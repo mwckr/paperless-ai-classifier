@@ -38,8 +38,8 @@ OLLAMA_URL=${OLLAMA_URL:-http://localhost:11434}
 read -p "Ollama Model [gemma4:e4b]: " OLLAMA_MODEL
 OLLAMA_MODEL=${OLLAMA_MODEL:-gemma4:e4b}
 
-read -p "Ollama Threads [10]: " OLLAMA_THREADS
-OLLAMA_THREADS=${OLLAMA_THREADS:-10}
+read -p "Ollama CPU threads (0 = let Ollama pick) [0]: " OLLAMA_THREADS
+OLLAMA_THREADS=${OLLAMA_THREADS:-0}
 
 read -p "Max pages to process [3]: " MAX_PAGES
 MAX_PAGES=${MAX_PAGES:-3}
@@ -82,19 +82,46 @@ PAPERLESS_TOKEN=$PAPERLESS_TOKEN
 OLLAMA_URL=$OLLAMA_URL
 OLLAMA_MODEL=$OLLAMA_MODEL
 OLLAMA_THREADS=$OLLAMA_THREADS
-OLLAMA_TEMPERATURE=0.7
-OLLAMA_TOP_P=0.95
-OLLAMA_TOP_K=64
+# Low temperature = consistent names (classification, not creative writing)
+OLLAMA_TEMPERATURE=0.1
+# Context window and output cap. Raise OLLAMA_NUM_CTX if the log warns that the prompt nearly fills it.
+OLLAMA_NUM_CTX=4096
+OLLAMA_NUM_PREDICT=512
+# Thinking tokens cost minutes on CPU and add nothing for classification
+OLLAMA_THINK=false
+# Constrain the reply to a JSON schema (needs Ollama >= 0.5)
+OLLAMA_STRUCTURED_OUTPUT=true
+# How long the model stays in RAM after a request; true = unload as soon as the queue is empty
+OLLAMA_KEEP_ALIVE=5m
+OLLAMA_UNLOAD_WHEN_IDLE=false
+OLLAMA_TIMEOUT=600
 
 # Processing Options
+# OCR_TEXT_MODE: off  = page images only (recommended: the model needs the layout to tell
+#                       sender from recipient and subject from boilerplate)
+#                hint = page images plus Paperless' OCR text as a reading aid for small print
+#                only = OCR text only, no images (last resort for hardware without a vision model)
+OCR_TEXT_MODE=off
+OCR_TEXT_CHARS=2000
 MAX_PAGES=$MAX_PAGES
+IMAGE_MAX_SIZE=1024
+IMAGE_QUALITY=85
+IMAGE_GRAYSCALE=false
 AUTO_COMMIT=$AUTO_COMMIT
+# false = only fill empty document type / correspondent; tags are merged (TAGS_MODE=merge|replace)
+OVERWRITE_EXISTING=false
+TAGS_MODE=merge
 GENERATE_EXPLANATIONS=false
 
 # Learning & Normalization
 LEARNING_ENABLED=true
 FEW_SHOT_ENABLED=false
 INJECT_EXISTING_TYPES=true
+INJECT_EXISTING_CORRESPONDENTS=true
+INJECT_EXISTING_TAGS=true
+PROMPT_TYPE_LIMIT=50
+PROMPT_CORRESPONDENT_LIMIT=60
+PROMPT_TAG_LIMIT=80
 FUZZY_MATCH_THRESHOLD=0.80
 
 # Polling (set to 0 to disable and use webhooks instead)
