@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paperless AI Classifier</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 rx=%273%27 fill=%27%234cc2ff%27/%3E%3Cpath d=%27M4 4h8v1.5H4zM4 7.25h8v1.5H4zM4 10.5h5V12H4z%27 fill=%27%2306121c%27/%3E%3C/svg%3E">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>Paperless AI Classifier</h1>
+    <span class="chip mono" id="version-chip" title="version">…</span>
+  </div>
+  <div class="health">
+    <span class="dot" id="h-paperless" title="Paperless">Paperless</span>
+    <span class="dot" id="h-ollama" title="Ollama">Ollama</span>
+    <span class="dot" id="h-model" title="Model in RAM">Model</span>
+  </div>
+</header>
+
+<nav id="tabs">
+  <button data-tab="overview" class="active">Overview</button>
+  <button data-tab="activity">Activity</button>
+  <button data-tab="learning">Learning</button>
+  <button data-tab="config">Config</button>
+  <button data-tab="tools">Tools</button>
+  <button data-tab="logs">Logs</button>
+</nav>
+
+<main>
+<!-- ============================================================ Overview -->
+<section id="tab-overview" class="tab active">
+  <div class="tiles" id="tiles"></div>
+  <div class="grid-2">
+    <div class="card">
+      <h2>Now</h2>
+      <div id="now" class="now idle">Idle</div>
+      <div class="row">
+        <input id="classify-id" type="number" min="1" placeholder="Document id">
+        <button id="classify-btn" class="primary">Classify</button>
+        <button id="reanalyze-btn" title="Overwrite existing type/correspondent">Re-analyze</button>
+        <button id="clear-queue-btn" class="danger">Clear queue</button>
+      </div>
+      <div id="pending" class="pending"></div>
+    </div>
+    <div class="card">
+      <h2>Model</h2>
+      <div id="model-info" class="kv"></div>
+      <div class="row"><button id="unload-btn">Unload model now</button></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Recent activity</h2>
+    <table class="table" id="recent"><tbody></tbody></table>
+  </div>
+</section>
+
+<!-- ============================================================ Activity -->
+<section id="tab-activity" class="tab">
+  <div class="card">
+    <div class="row toolbar">
+      <select id="act-status">
+        <option value="">All statuses</option>
+        <option value="completed">Completed</option>
+        <option value="failed">Failed</option>
+        <option value="skipped">Skipped</option>
+        <option value="processing">Processing</option>
+        <option value="abandoned">Abandoned</option>
+      </select>
+      <input id="act-q" type="search" placeholder="Search title, type, correspondent, tag, id">
+      <span class="spacer"></span>
+      <button id="act-cleanup" title="Mark stale 'processing' rows as abandoned">Cleanup stale</button>
+      <button id="act-del-failed" class="danger">Delete failed</button>
+      <button id="act-del-skipped" class="danger">Delete skipped</button>
+    </div>
+    <table class="table" id="activity">
+      <thead><tr><th>Time</th><th>Doc</th><th>Type</th><th>Correspondent</th><th>Tags</th><th>Conf</th><th>Time</th><th>Status</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="row pager"><button id="act-prev">‹ Newer</button><span id="act-page"></span><button id="act-next">Older ›</button></div>
+  </div>
+</section>
+
+<!-- ============================================================ Learning -->
+<section id="tab-learning" class="tab">
+  <div class="grid-2">
+    <div class="card">
+      <h2>Term mappings <small>applied before writing to Paperless</small></h2>
+      <div class="row">
+        <select id="map-type"><option value="document_type">Type</option><option value="correspondent">Correspondent</option><option value="tag">Tag</option></select>
+        <input id="map-ai" placeholder="When the model says…">
+        <input id="map-user" placeholder="…use this instead">
+        <button id="map-add" class="primary">Add</button>
+      </div>
+      <table class="table" id="mappings"><thead><tr><th>Kind</th><th>Model says</th><th>Becomes</th><th>Used</th><th></th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Verified examples <small>used as few-shot examples when enabled</small></h2>
+      <table class="table" id="examples"><thead><tr><th>Doc</th><th>Type</th><th>Correspondent</th><th>Tags</th><th></th></tr></thead><tbody></tbody></table>
+      <div class="row"><button id="ex-clear" class="danger">Delete all examples</button><button id="learn-reset" class="danger">Reset all learning</button></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ Config -->
+<section id="tab-config" class="tab">
+  <div class="card">
+    <div class="row toolbar">
+      <span id="config-dirty" class="muted">No unsaved changes</span>
+      <span class="spacer"></span>
+      <button id="config-reload">Discard</button>
+      <button id="config-save" class="primary">Save</button>
+      <button id="restart-btn" class="danger" title="systemd restarts the service">Restart service</button>
+    </div>
+    <div id="restart-banner" class="banner hidden">A saved setting needs a service restart to take effect.</div>
+    <div id="config-form"></div>
+  </div>
+</section>
+
+<!-- ============================================================ Tools -->
+<section id="tab-tools" class="tab">
+  <div class="grid-2">
+    <div class="card">
+      <h2>Dry run <small>analyze without writing to Paperless; shows the exact prompt and answer</small></h2>
+      <div class="row">
+        <input id="dry-id" type="number" min="1" placeholder="Document id">
+        <button id="dry-btn" class="primary">Run</button>
+        <span id="dry-state" class="muted"></span>
+      </div>
+      <div id="dry-result"></div>
+    </div>
+    <div class="card">
+      <h2>Version &amp; update</h2>
+      <div id="about" class="kv"></div>
+      <div class="row">
+        <button id="update-btn" class="primary">Update now</button>
+        <a class="button" href="/api/export/debug">Download debug export</a>
+        <a class="button" href="/api/docs" target="_blank">API docs</a>
+      </div>
+      <pre id="update-log" class="log hidden"></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ Logs -->
+<section id="tab-logs" class="tab">
+  <div class="card">
+    <div class="row toolbar">
+      <select id="log-level"><option value="">All levels</option><option>ERROR</option><option>WARNING</option><option>INFO</option><option>DEBUG</option></select>
+      <select id="log-lines"><option>100</option><option selected>300</option><option>1000</option></select>
+      <label class="check"><input type="checkbox" id="log-auto" checked> auto-refresh</label>
+      <span class="spacer"></span>
+      <button id="log-refresh">Refresh</button>
+    </div>
+    <pre id="log-view" class="log"></pre>
+  </div>
+</section>
+</main>
+
+<!-- ============================================================ Modals -->
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <button class="close" id="modal-close">×</button>
+    <div id="modal-body"></div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<datalist id="dl-types"></datalist>
+<datalist id="dl-correspondents"></datalist>
+<datalist id="dl-tags"></datalist>
+<datalist id="dl-models"></datalist>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

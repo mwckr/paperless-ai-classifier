@@ -1358,113 +1358,41 @@ setup_api() {
   local install_output
   install_output=$(pct exec "$API_CTID" -- bash -c '
     set -e
-    
-    # Update and install dependencies
     apt-get update -qq
-    apt-get install -y -qq python3 python3-pip sqlite3 poppler-utils curl ca-certificates >/dev/null 2>&1
-    
-    # Create directory
-    mkdir -p /opt/paperless-classifier
-    cd /opt/paperless-classifier
-    
-    # Download application files
-    curl -fsSL https://raw.githubusercontent.com/mwckr/paperless-ai-classifier/main/gemma4.py -o gemma4.py
-    curl -fsSL https://raw.githubusercontent.com/mwckr/paperless-ai-classifier/main/learning.py -o learning.py
-    curl -fsSL https://raw.githubusercontent.com/mwckr/paperless-ai-classifier/main/classifier_api_v2.py -o classifier_api_v2.py
-    
-    # Verify downloads
-    if [[ ! -s gemma4.py ]] || [[ ! -s learning.py ]] || [[ ! -s classifier_api_v2.py ]]; then
-      echo "ERROR: Failed to download application files"
-      exit 1
+    apt-get install -y -qq git ca-certificates curl >/dev/null 2>&1
+    if [[ -d /opt/paperless-classifier/.git ]]; then
+      git -C /opt/paperless-classifier pull --ff-only
+    else
+      [[ -d /opt/paperless-classifier ]] && mv /opt/paperless-classifier /opt/paperless-classifier.old
+      git clone -q https://github.com/mwckr/paperless-ai-classifier.git /opt/paperless-classifier
     fi
-    
-    # Install Python dependencies
-    pip3 install fastapi uvicorn python-dotenv pydantic requests pillow pdf2image --break-system-packages -q
-    
-    # Create systemd service
-    cat > /etc/systemd/system/paperless-classifier.service << EOF
-[Unit]
-Description=Paperless Document Classifier API
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/paperless-classifier
-EnvironmentFile=/opt/paperless-classifier/.env
-ExecStart=/usr/bin/python3 /opt/paperless-classifier/classifier_api_v2.py
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    
-    systemctl daemon-reload
-    
-    echo "API installation complete"
+    echo "Checkout ready"
   ' 2>&1)
   
   local exit_code=$?
-  log "API install output: $install_output"
+  log "API checkout output: $install_output"
   
+  if [[ $exit_code -ne 0 ]]; then
+    die "Could not clone the classifier repository. Check logs: $LOG_FILE"
+  fi
+  
+  # Minimal .env with the connection settings; install.sh fills in every other key with its default
+  msg_info "Configuring API..."
+  local env_content="PAPERLESS_URL=${PAPERLESS_URL}
+PAPERLESS_TOKEN=${PAPERLESS_TOKEN}
+OLLAMA_URL=http://${OLLAMA_IP}:11434
+OLLAMA_MODEL=${var_model}
+POLL_INTERVAL=60
+API_PORT=8001"
+  echo "$env_content" | pct exec "$API_CTID" -- tee /opt/paperless-classifier/.env >/dev/null
+  
+  msg_info "Installing Classifier API (venv, dependencies, systemd)..."
+  install_output=$(pct exec "$API_CTID" -- bash -c 'cd /opt/paperless-classifier && ./install.sh --non-interactive' 2>&1)
+  exit_code=$?
+  log "API install output: $install_output"
   if [[ $exit_code -ne 0 ]]; then
     die "API installation failed. Check logs: $LOG_FILE"
   fi
-  
-  # Write .env file (doing this separately to handle special characters)
-  msg_info "Configuring API..."
-  
-  local env_content="# Paperless Configuration
-PAPERLESS_URL=${PAPERLESS_URL}
-PAPERLESS_TOKEN=${PAPERLESS_TOKEN}
-
-# Ollama Configuration  
-OLLAMA_URL=http://${OLLAMA_IP}:11434
-OLLAMA_MODEL=${var_model}
-OLLAMA_THREADS=0
-OLLAMA_TEMPERATURE=0.1
-OLLAMA_NUM_CTX=4096
-OLLAMA_NUM_PREDICT=512
-OLLAMA_THINK=false
-OLLAMA_STRUCTURED_OUTPUT=true
-OLLAMA_KEEP_ALIVE=5m
-OLLAMA_UNLOAD_WHEN_IDLE=false
-OLLAMA_TIMEOUT=600
-
-# Processing Options
-OCR_TEXT_MODE=off
-OCR_TEXT_CHARS=2000
-MAX_PAGES=3
-IMAGE_MAX_SIZE=1024
-IMAGE_QUALITY=85
-IMAGE_GRAYSCALE=false
-AUTO_COMMIT=true
-OVERWRITE_EXISTING=false
-TAGS_MODE=merge
-GENERATE_EXPLANATIONS=false
-POLL_INTERVAL=60
-
-# Learning & Normalization
-LEARNING_ENABLED=true
-FEW_SHOT_ENABLED=false
-INJECT_EXISTING_TYPES=true
-INJECT_EXISTING_CORRESPONDENTS=true
-INJECT_EXISTING_TAGS=true
-PROMPT_TYPE_LIMIT=50
-PROMPT_CORRESPONDENT_LIMIT=60
-PROMPT_TAG_LIMIT=80
-FUZZY_MATCH_THRESHOLD=0.80
-
-# API Configuration
-API_HOST=0.0.0.0
-API_PORT=8001"
-  
-  echo "$env_content" | pct exec "$API_CTID" -- tee /opt/paperless-classifier/.env >/dev/null
-  
-  # Start service
-  pct exec "$API_CTID" -- systemctl enable paperless-classifier >/dev/null 2>&1
-  pct exec "$API_CTID" -- systemctl start paperless-classifier
   
   msg_ok "Classifier API installed"
   

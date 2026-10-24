@@ -1,8 +1,11 @@
 .DS_Store
 *.bak
-/__pycache__/
+__pycache__/
 *.pyc
-*.env
-*.log
-/logs/
-/backup_*/
+.env
+venv/
+logs/
+classifier_audit.db
+classifier_audit.db-*
+*.old/
+.pytest_cache/

@@ -1,219 +1,158 @@
 # Paperless AI Classifier
 
-AI-powered document classification for [Paperless-ngx](https://docs.paperless-ngx.com/) using a local
-[Ollama](https://ollama.ai) model. Built for German household paperwork on a home server: no GPU, limited
-RAM, CPU inference.
+Classifies documents in [Paperless-ngx](https://docs.paperless-ngx.com/) with a local
+[Ollama](https://ollama.ai) vision model: document type, correspondent and tags. Built for German household
+paperwork on a home server or Proxmox container without a GPU and with limited RAM.
 
-For every new document the service:
+For every new document the service renders the first pages as images, asks the model for type, correspondent,
+tags and a confidence value, normalizes the answer against the names already in Paperless (plus corrections you
+taught it), writes the result back and logs everything in a dashboard.
 
-1. loads the document from Paperless and renders the first pages as images,
-2. asks the model for document type, correspondent, tags and a confidence value,
-3. normalizes the answer against the names already in Paperless plus corrections you taught it,
-4. writes the result back to Paperless (optional) and logs it in an audit database with a web dashboard.
+Page images are the input on purpose. The layout tells the model who the sender is (letterhead, top left), what
+the table in the middle lists and that the numbers in the footer are bank details. Flat OCR text loses those
+relationships and was found to be worse in testing.
 
 ## Features
 
-- Works with vision models (Gemma 4, Gemma 3, Ministral, Qwen-VL, LLaVA) and, in text-only mode,
-  with any Ollama model
-- Classifies from page images, so the model sees the layout: letterhead, tables, footers
-- Existing document types, correspondents and tags are offered to the model, most used first,
-  so names stay consistent
-- Learning layer: term mappings and verified examples from your corrections in the dashboard
-- Never destroys data by default: existing type and correspondent are kept, tags are merged
-- Web dashboard: queue, audit log, correction modal, mappings, config editor, log viewer, debug export
-- Polling and webhook triggers
+- Any Ollama vision model (Gemma 4, Gemma 3, Ministral, Qwen-VL, LLaVA)
+- Tuned for CPU: thinking off, capped output, explicit context window, JSON-schema constrained answers,
+  one render pass per page, model unload when idle
+- Existing document types, correspondents and tags are offered to the model, most used first, so names stay
+  consistent
+- Learning: term mappings and verified examples from your corrections
+- Safe write-back: existing type and correspondent are kept, tags are merged, already classified documents are
+  skipped
+- Dashboard: live status with timing breakdown, activity log with filters and correction modal, learning data,
+  config editor with help text (applies live), dry run that shows the exact prompt and raw answer, log viewer,
+  one-click update
+- Polling and webhook triggers, guided setup, git-based updates
 
 ## Requirements
 
-- Debian or Ubuntu Linux (tested on Ubuntu 24.04), `poppler-utils` for PDF rendering
-- Ollama 0.5 or newer (structured output) with a model pulled
+- Debian 12 / Ubuntu 22.04 or newer (Python 3.9+, `python3-venv`, `poppler-utils`, `git`)
+- Ollama 0.5 or newer with a model pulled (`ollama pull gemma4:e4b`)
 - Paperless-ngx with an API token
-- RAM: depends on the model. `gemma4:e4b` needs roughly 6 to 8 GB while loaded; text-only mode with a 2 to 4B
-  model runs in 3 to 4 GB
+- RAM for the model: `gemma4:e4b` needs roughly 6 to 8 GB while loaded
 
-## Installation
+## Install
 
 ```bash
-curl -fsSL https://ollama.ai/install.sh | sh
-ollama pull gemma4:e4b
-
-git clone <this repo> && cd paperless-ai-classifier
-sudo ./install.sh          # interactive, installs to /opt/paperless-classifier and creates a systemd unit
+sudo git clone https://github.com/mwckr/paperless-ai-classifier.git /opt/paperless-classifier
+cd /opt/paperless-classifier
+sudo ./install.sh
 ```
 
-Later updates: `git pull && sudo ./deploy.sh` (copies the three application files and restarts the service).
-`upgrade_v3.sh` additionally adds any new `.env` keys to an existing installation.
+The installer creates a virtual environment, asks for the essential settings one by one (Paperless URL and
+token, Ollama URL and model, pages, auto-commit, poll interval, port), tests both connections, writes a
+complete `.env` with comments, and installs a systemd service that runs from the checkout.
 
-For Proxmox there is `pve-install.sh`, which creates two LXC containers (Ollama and the API).
+**Coming from the old copy-based installation** (files in `/opt/paperless-classifier` without `.git`):
 
-## Package contents
+```bash
+sudo mv /opt/paperless-classifier /opt/paperless-classifier.old
+sudo git clone https://github.com/mwckr/paperless-ai-classifier.git /opt/paperless-classifier
+cd /opt/paperless-classifier && sudo ./install.sh     # offers to import .env and the audit database
+```
 
-| File | Role |
-|------|------|
-| `classifier_api_v2.py` | FastAPI service: queue worker, polling, webhook, SQLite audit log, dashboard |
-| `gemma4.py` | Classification engine: fetches documents, builds the prompt, calls Ollama, updates Paperless |
-| `learning.py` | Fuzzy matching, term mappings, few-shot examples |
-| `install.sh`, `deploy.sh`, `upgrade_v3.sh`, `pve-install.sh` | Deployment scripts |
-| `ministral.py`, `classifier_api.py`, `test_gemma4.py`, `upgrade_v2.sh` | Legacy, not deployed by any script |
+**Proxmox:** `pve-install.sh` creates an Ollama container and an API container and runs the same installer.
+
+## Update
+
+```bash
+sudo /opt/paperless-classifier/update.sh
+```
+
+or the **Update now** button in the dashboard (Tools tab). Both pull, install requirements, run the settings
+check and restart. The check is silent when nothing is missing. Settings that a newer version introduced are
+appended with their defaults, essential ones are asked, and a failing connection test offers to re-enter the
+related values.
+
+## Dashboard
+
+`http://your-server:8001/`
+
+| Tab | What it does |
+|-----|--------------|
+| Overview | Stats, current document with stage and elapsed time, queue, model in RAM, recent activity |
+| Activity | Audit log with status filter, search and paging. Details (timing breakdown, model output, normalization, raw answer), Correct, Redo, Delete |
+| Learning | Term mappings and verified examples |
+| Config | Every setting with help text. Changes apply immediately, except host and port |
+| Tools | Dry run for one document (prompt, raw answer, timing, nothing written), version and update, debug export |
+| Logs | Log tail with level filter |
+
+No authentication: keep the port on a trusted network.
 
 ## Configuration
 
-All settings live in `/opt/paperless-classifier/.env` and can also be changed in the dashboard
-(Config tab, followed by a restart).
+Everything lives in `/opt/paperless-classifier/.env` and in the Config tab. The complete list with help text
+is in `app/config.py`. The settings that matter most:
 
-### Connection
+| Setting | Default | Notes |
+|---------|---------|-------|
+| `OLLAMA_MODEL` | `gemma4:e4b` | Any vision model from `ollama list` |
+| `OLLAMA_TEMPERATURE` | `0.1` | Low values give stable names |
+| `OLLAMA_NUM_CTX` | `4096` | The log warns when a prompt nearly fills it |
+| `OLLAMA_NUM_PREDICT` | `512` | Output cap |
+| `OLLAMA_THINK` | `false` | Thinking costs minutes on CPU and adds nothing here |
+| `OLLAMA_STRUCTURED_OUTPUT` | `true` | JSON schema; falls back automatically on servers that reject it |
+| `OLLAMA_KEEP_ALIVE` / `OLLAMA_UNLOAD_WHEN_IDLE` | `5m` / `false` | RAM between batches |
+| `OLLAMA_THREADS` | `0` | 0 = let Ollama choose |
+| `MAX_PAGES` | `3` | Each page is one vision encoder pass |
+| `IMAGE_MAX_SIZE` | `1024` | Longest side |
+| `OCR_TEXT_MODE` | `off` | `hint` adds OCR text as a reading aid next to the images, `only` sends no images (last resort) |
+| `AUTO_COMMIT` | `true` | Write results to Paperless |
+| `OVERWRITE_EXISTING` | `false` | Only fill empty type/correspondent. Re-analyze always overwrites |
+| `TAGS_MODE` | `merge` | Keep the document's existing tags |
+| `SKIP_CLASSIFIED` | `true` | Documents with type and correspondent are not sent to the model |
+| `INJECT_EXISTING_*`, `PROMPT_*_LIMIT` | on, 50/60/80 | Reference lists in the prompt, most used first |
+| `LEARNING_ENABLED`, `FUZZY_MATCH_THRESHOLD` | `true`, `0.80` | Normalization |
+| `POLL_INTERVAL` | `60` | 0 = webhooks only |
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `PAPERLESS_URL` | `http://localhost:8000` | Paperless-ngx URL |
-| `PAPERLESS_TOKEN` | (required) | API token |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama URL |
-| `OLLAMA_MODEL` | `gemma4:e4b` | Model name as shown by `ollama list` |
-| `API_HOST` / `API_PORT` | `0.0.0.0` / `8001` | Dashboard bind address and port |
-| `POLL_INTERVAL` | `60` | Seconds between checks for new documents, `0` = webhooks only |
+## Tuning for slow hardware
 
-### Ollama runtime
+Per document the model pays for loading itself, reading the prompt (the images dominate) and writing the
+answer. The `Ollama timing` log line and the Details view show the split. In order of effect:
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `OLLAMA_THREADS` | `0` | CPU threads. `0` lets Ollama choose (physical cores). More threads than cores slows things down |
-| `OLLAMA_TEMPERATURE` | model default | `0.1` recommended. Low values give stable, repeatable names |
-| `OLLAMA_TOP_P`, `OLLAMA_TOP_K` | model default | Only sent when set |
-| `OLLAMA_NUM_CTX` | `4096` | Context window in tokens. The log warns when a prompt nearly fills it |
-| `OLLAMA_NUM_PREDICT` | `512` | Maximum output tokens |
-| `OLLAMA_THINK` | `false` | Thinking mode for models that support it. Costs minutes on CPU, adds nothing here |
-| `OLLAMA_STRUCTURED_OUTPUT` | `true` | Constrain the reply to a JSON schema. Falls back automatically on servers that reject it |
-| `OLLAMA_KEEP_ALIVE` | `5m` | How long the model stays loaded after a request |
-| `OLLAMA_UNLOAD_WHEN_IDLE` | `false` | Unload the model as soon as the queue is empty |
-| `OLLAMA_TIMEOUT` | `600` | Seconds to wait for one answer |
+1. `MAX_PAGES=1` or `2`. The first page carries the letterhead and most of the structure.
+2. `IMAGE_MAX_SIZE=768`. Still enough for layout and logos.
+3. `OLLAMA_UNLOAD_WHEN_IDLE=true` when Paperless and Ollama share the machine.
+4. Leave `OLLAMA_THREADS=0` or set it to the number of physical cores.
+5. Keep `OLLAMA_NUM_CTX` at 4096 unless the log complains. The KV cache grows with it.
+6. On the Ollama host: `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_MAX_LOADED_MODELS=1`, and on recent versions
+   `OLLAMA_FLASH_ATTENTION=1` with `OLLAMA_KV_CACHE_TYPE=q8_0`.
 
-### Input
+Use the dry run in the Tools tab to compare settings on one document without touching Paperless.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `OCR_TEXT_MODE` | `off` | `off`: page images only (recommended). `hint`: images plus Paperless' OCR text as a reading aid. `only`: OCR text, no images |
-| `OCR_TEXT_CHARS` | `2000` | Characters of OCR text sent in `hint`/`only` mode (from the start of the document) |
-| `MAX_PAGES` | `3` | Pages rendered as images. Every page is one vision encoder pass |
-| `IMAGE_MAX_SIZE` | `1024` | Longest side in pixels |
-| `IMAGE_QUALITY` | `85` | JPEG quality |
-| `IMAGE_GRAYSCALE` | `false` | Grayscale page images (smaller payload) |
-| `PDF_RENDER_TIMEOUT` | `120` | Seconds allowed for `pdftoppm` |
+## Triggers
 
-### Writing back
+- Polling: every `POLL_INTERVAL` seconds, all documents newer than the last seen id
+- Webhook: Paperless workflow action "Webhook" to `http://your-server:8001/webhook/paperless` with a body
+  containing `document_id`, or a post-consume script calling `POST /webhook/paperless/{id}`
+- API: `POST /api/classify {"document_id": N}`, `POST /api/classify/batch [N, …]`,
+  `POST /api/reanalyze/{id}`
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `AUTO_COMMIT` | `true` | Apply results to Paperless |
-| `OVERWRITE_EXISTING` | `false` | `false`: only fill empty document type and correspondent. Re-analyze from the dashboard always overwrites |
-| `TAGS_MODE` | `merge` | `merge` keeps the document's existing tags (inbox tag, matching rules), `replace` does not |
-| `GENERATE_EXPLANATIONS` | `false` | Ask for a one-sentence explanation (shown in the audit log) |
+Interactive API docs: `/api/docs`.
 
-### Prompt and learning
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `INJECT_EXISTING_TYPES` | `true` | Offer existing document types to the model |
-| `INJECT_EXISTING_CORRESPONDENTS` | `true` | Offer existing correspondents |
-| `INJECT_EXISTING_TAGS` | `true` | Offer existing tags |
-| `PROMPT_TYPE_LIMIT` / `PROMPT_CORRESPONDENT_LIMIT` / `PROMPT_TAG_LIMIT` | `50` / `60` / `80` | How many of each list go into the prompt, most used first |
-| `LEARNING_ENABLED` | `true` | Fuzzy-match results against Paperless names and learned mappings |
-| `FUZZY_MATCH_THRESHOLD` | `0.80` | Similarity needed to map a name onto an existing one |
-| `FEW_SHOT_ENABLED` | `false` | Add up to three verified examples to the prompt |
-
-## Tuning for low-powered devices
-
-Per document the model pays for three things: loading itself into RAM, reading the prompt (images are by far
-the most expensive part), and writing the answer. The defaults already remove the biggest waste (thinking
-tokens, unbounded output, prose around the JSON). Beyond that, in order of effect:
-
-1. **Fewer pages.** `MAX_PAGES=1` or `2`. Every page is a full vision encoder pass, and the first page carries
-   the letterhead, subject line and most of the structure.
-2. **Smaller images.** `IMAGE_MAX_SIZE=768` keeps layout and logos readable for most letters and invoices.
-3. **Free RAM between batches.** `OLLAMA_UNLOAD_WHEN_IDLE=true` when Paperless and Ollama share the
-   machine. Reloading costs a few seconds per batch.
-4. **Threads.** Leave `OLLAMA_THREADS=0`, or set it to the number of physical cores.
-5. **Context.** Keep `OLLAMA_NUM_CTX` at 4096 unless the log says the prompt nearly fills it. The KV cache
-   grows with the context window.
-6. **On the Ollama host**, `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_LOADED_MODELS=1` avoid a second copy
-   of the model in RAM. `OLLAMA_FLASH_ATTENTION=1` with `OLLAMA_KV_CACHE_TYPE=q8_0` roughly halves the
-   KV cache on recent Ollama versions.
-
-**About Paperless' OCR text.** Using it instead of images was tested during development and found to be
-worse: the flat text loses the layout, and the layout is what tells the model that the address top left is
-the sender, that the table in the middle lists clients, and that the numbers in the footer are bank details.
-That is why `OCR_TEXT_MODE` defaults to `off`. `hint` adds the text as a reading aid next to the images
-(the prompt tells the model the images are authoritative). `only` exists for hardware that cannot run a
-vision model at all; expect lower accuracy on sender and subject.
-
-The log line `Ollama timing: load … | prompt … | output …` after each document shows where the time goes.
-
-## Usage
-
-Dashboard: `http://your-server:8001/`
+## Development
 
 ```bash
-# queue one document
-curl -X POST http://localhost:8001/api/classify -H "Content-Type: application/json" -d '{"document_id": 123}'
-# queue several
-curl -X POST http://localhost:8001/api/classify/batch -H "Content-Type: application/json" -d '[1, 2, 3]'
-# re-analyze and overwrite existing type/correspondent
-curl -X POST http://localhost:8001/api/reanalyze/123
+python3 -m venv venv && venv/bin/pip install -r requirements.txt pytest
+cp .env.example .env            # or run: venv/bin/python -m app.setup
+venv/bin/python -m app          # http://localhost:8001
+venv/bin/python -m pytest tests/   # unit tests plus an end-to-end run against mock Paperless/Ollama servers
 ```
 
-Webhook from a Paperless workflow (action "Webhook", URL `http://your-server:8001/webhook/paperless`,
-body containing `document_id`) or `POST /webhook/paperless/{id}` from a post-consume script.
+`PCLS_ENV`, `PCLS_DB` and `PCLS_LOGS` override the locations of `.env`, the SQLite database and the log directory.
 
-### API endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/`, `/dashboard` | GET | Web dashboard |
-| `/api/health` | GET | Paperless and Ollama reachability |
-| `/api/queue` | GET | Queue status |
-| `/api/stats` | GET | Statistics |
-| `/api/audit` | GET | Audit log |
-| `/api/classify` | POST | Queue one document `{"document_id": N}` |
-| `/api/classify/batch` | POST | Queue many `[N, …]` |
-| `/api/reanalyze/{id}` | POST | Re-queue with overwrite |
-| `/api/config` | GET, POST | Read / update one `.env` key |
-| `/api/restart` | POST | Restart the service (systemd restarts it) |
-| `/api/mappings`, `/api/learn/*` | various | Learning data |
-| `/api/export/debug` | GET | Debug export (config, health, recent runs, log tail) |
-| `/api/logs` | GET | Last log lines |
-| `/webhook/paperless[/{id}]` | POST | Webhook |
-
-The dashboard and API have no authentication. Keep port 8001 on a trusted network or put it behind a
-reverse proxy with auth.
-
-## Service management
+## Service
 
 ```bash
 systemctl status paperless-classifier
-systemctl restart paperless-classifier
 journalctl -u paperless-classifier -f
 ```
 
-## Troubleshooting
-
-- **Classification fails with `vision_analysis_failed`**: check the log for the Ollama error. Old Ollama
-  versions reject `think` or `format`; the service retries without them and remembers that.
-- **Prompt nearly fills the context**: the log says so. Raise `OLLAMA_NUM_CTX` or lower `MAX_PAGES`,
-  `OCR_TEXT_CHARS` or the `PROMPT_*_LIMIT` values.
-- **Too slow**: see the tuning section. The `Ollama timing` log line tells you whether loading,
-  prompt processing (images) or generation dominates.
-- **Wrong sender or subject after enabling `OCR_TEXT_MODE`**: set it back to `off`. The images are the
-  better source.
-- **Model not found**: `ollama list`, then `ollama pull <model>`.
-- **Nothing is picked up**: `POLL_INTERVAL > 0` or a webhook configured, token valid, Ollama reachable.
-
-## Uninstall
-
-```bash
-sudo systemctl disable --now paperless-classifier
-sudo rm /etc/systemd/system/paperless-classifier.service
-sudo rm -rf /opt/paperless-classifier
-sudo systemctl daemon-reload
-```
+Uninstall: `systemctl disable --now paperless-classifier`, remove `/etc/systemd/system/paperless-classifier.service`
+and the checkout.
 
 ## License
 
