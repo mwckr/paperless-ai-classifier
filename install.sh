@@ -97,10 +97,11 @@ OLLAMA_UNLOAD_WHEN_IDLE=false
 OLLAMA_TIMEOUT=600
 
 # Processing Options
-# OCR_TEXT_MODE: hint = send Paperless' OCR text together with page images (recommended)
-#                only = text only, no images (fastest, works with non-vision models)
-#                off  = images only
-OCR_TEXT_MODE=hint
+# OCR_TEXT_MODE: off  = page images only (recommended: the model needs the layout to tell
+#                       sender from recipient and subject from boilerplate)
+#                hint = page images plus Paperless' OCR text as a reading aid for small print
+#                only = OCR text only, no images (last resort for hardware without a vision model)
+OCR_TEXT_MODE=off
 OCR_TEXT_CHARS=2000
 MAX_PAGES=$MAX_PAGES
 IMAGE_MAX_SIZE=1024

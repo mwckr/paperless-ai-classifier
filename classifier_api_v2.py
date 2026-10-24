@@ -76,7 +76,8 @@ def get_config():
         "IMAGE_MAX_SIZE": _env_int("IMAGE_MAX_SIZE", 1024),
         "IMAGE_QUALITY": _env_int("IMAGE_QUALITY", 85),
         "IMAGE_GRAYSCALE": _env_bool("IMAGE_GRAYSCALE", False),
-        "OCR_TEXT_MODE": (os.getenv("OCR_TEXT_MODE", "hint") or "hint").strip().lower(),
+        # off by default: page images carry the layout (letterhead vs. table vs. footer) that flat OCR text loses
+        "OCR_TEXT_MODE": (os.getenv("OCR_TEXT_MODE", "off") or "off").strip().lower(),
         "OCR_TEXT_CHARS": _env_int("OCR_TEXT_CHARS", 2000),
         "OLLAMA_TIMEOUT": _env_int("OLLAMA_TIMEOUT", 600),
         "PDF_RENDER_TIMEOUT": _env_int("PDF_RENDER_TIMEOUT", 120),
@@ -1638,7 +1639,7 @@ DASHBOARD_HTML = '''
                     { key: 'OLLAMA_KEEP_ALIVE', label: 'Keep Model Loaded', placeholder: '5m' },
                     { key: 'OLLAMA_UNLOAD_WHEN_IDLE', label: 'Unload When Queue Empty', type: 'select', options: ['false', 'true'] },
                     { key: 'OLLAMA_TIMEOUT', label: 'Ollama Timeout (sec)' },
-                    { key: 'OCR_TEXT_MODE', label: 'Paperless OCR Text', type: 'select', options: ['hint', 'only', 'off'] },
+                    { key: 'OCR_TEXT_MODE', label: 'Paperless OCR Text (off recommended)', type: 'select', options: ['off', 'hint', 'only'] },
                     { key: 'OCR_TEXT_CHARS', label: 'OCR Text Chars' },
                     { key: 'MAX_PAGES', label: 'Max Pages' },
                     { key: 'IMAGE_MAX_SIZE', label: 'Image Max Size (px)' },

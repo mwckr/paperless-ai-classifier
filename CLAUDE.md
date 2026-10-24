@@ -53,7 +53,7 @@ and the `add_env` block in `upgrade_v3.sh`, and to the README table.
 |-------|------|
 | Connection | `PAPERLESS_URL`, `PAPERLESS_TOKEN`, `OLLAMA_URL`, `OLLAMA_MODEL` (default `gemma4:e4b`), `API_HOST`, `API_PORT`, `POLL_INTERVAL` |
 | Ollama runtime | `OLLAMA_THREADS` (0 = auto), `OLLAMA_TEMPERATURE` / `OLLAMA_TOP_P` / `OLLAMA_TOP_K` (only sent if set), `OLLAMA_NUM_CTX` (4096), `OLLAMA_NUM_PREDICT` (512), `OLLAMA_THINK` (false), `OLLAMA_STRUCTURED_OUTPUT` (true), `OLLAMA_KEEP_ALIVE` (5m), `OLLAMA_UNLOAD_WHEN_IDLE` (false), `OLLAMA_TIMEOUT` (600) |
-| Input | `OCR_TEXT_MODE` (hint / only / off), `OCR_TEXT_CHARS` (2000), `MAX_PAGES` (3), `IMAGE_MAX_SIZE` (1024), `IMAGE_QUALITY` (85), `IMAGE_GRAYSCALE` (false), `PDF_RENDER_TIMEOUT` (120) |
+| Input | `OCR_TEXT_MODE` (off / hint / only, default off), `OCR_TEXT_CHARS` (2000), `MAX_PAGES` (3), `IMAGE_MAX_SIZE` (1024), `IMAGE_QUALITY` (85), `IMAGE_GRAYSCALE` (false), `PDF_RENDER_TIMEOUT` (120) |
 | Write-back | `AUTO_COMMIT` (true), `OVERWRITE_EXISTING` (false), `TAGS_MODE` (merge / replace), `GENERATE_EXPLANATIONS` (false) |
 | Prompt / learning | `INJECT_EXISTING_TYPES`, `INJECT_EXISTING_CORRESPONDENTS`, `INJECT_EXISTING_TAGS` (all true), `PROMPT_TYPE_LIMIT` (50), `PROMPT_CORRESPONDENT_LIMIT` (60), `PROMPT_TAG_LIMIT` (80), `LEARNING_ENABLED` (true), `FUZZY_MATCH_THRESHOLD` (0.80), `FEW_SHOT_ENABLED` (false) |
 
@@ -82,7 +82,8 @@ Dedup: `_pending_set` holds an id from enqueue until processing has finished.
 6. When the queue is empty: `invalidate_cache()` and, with `OLLAMA_UNLOAD_WHEN_IDLE`, `unload_model()`
 
 ### Engine (`gemma4.py`)
-1. `extract_ocr_excerpt(metadata)` — whitespace-collapsed first `OCR_TEXT_CHARS` characters of Paperless' OCR text
+1. `extract_ocr_excerpt(metadata)` — only when `OCR_TEXT_MODE` is `hint` or `only`: whitespace-collapsed first
+   `OCR_TEXT_CHARS` characters of Paperless' OCR text
 2. `fetch_document_images()` — `pdftoppm -jpeg -scale-to IMAGE_MAX_SIZE -l MAX_PAGES` into a temp dir, no second
    encode pass; image originals go through Pillow; fallbacks preview → thumbnail. Skipped in `OCR_TEXT_MODE=only`
    when OCR text exists.
@@ -167,8 +168,11 @@ classification_examples(id, document_id, document_title, document_type, correspo
 
 ## Notes for AI Assistants
 
-1. **Low-RAM goal.** Anything added to the prompt or to the image pipeline costs CPU time per document.
-   Prefer text over images, bound every list, and keep `num_ctx` small.
+1. **Images are the input, by design.** Classifying from Paperless' OCR text was tested and found to be
+   worse: flat text loses the layout (sender top left, client table in the middle, bank details in the
+   footer) that the model needs to relate the pieces. Do not switch the default `OCR_TEXT_MODE` away from
+   `off` or move accuracy work onto the text path. Cost reductions belong in fewer/smaller pages, bounded
+   lists, no thinking, capped output and a small `num_ctx`.
 2. **Single-file deployment.** `install.sh`/`deploy.sh` copy exactly three files. New modules mean updating
    both scripts and `upgrade_v3.sh`.
 3. **Embedded dashboard.** `DASHBOARD_HTML` in `classifier_api_v2.py` is intentional. Keep the CSS variable

@@ -6,7 +6,7 @@ RAM, CPU inference.
 
 For every new document the service:
 
-1. loads the document from Paperless (OCR text and, optionally, the first pages as images),
+1. loads the document from Paperless and renders the first pages as images,
 2. asks the model for document type, correspondent, tags and a confidence value,
 3. normalizes the answer against the names already in Paperless plus corrections you taught it,
 4. writes the result back to Paperless (optional) and logs it in an audit database with a web dashboard.
@@ -15,7 +15,7 @@ For every new document the service:
 
 - Works with vision models (Gemma 4, Gemma 3, Ministral, Qwen-VL, LLaVA) and, in text-only mode,
   with any Ollama model
-- Uses the OCR text Paperless already produced, so small print survives even at low image resolution
+- Classifies from page images, so the model sees the layout: letterhead, tables, footers
 - Existing document types, correspondents and tags are offered to the model, most used first,
   so names stay consistent
 - Learning layer: term mappings and verified examples from your corrections in the dashboard
@@ -91,8 +91,8 @@ All settings live in `/opt/paperless-classifier/.env` and can also be changed in
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `OCR_TEXT_MODE` | `hint` | `hint`: OCR text plus page images. `only`: OCR text, no images. `off`: images only |
-| `OCR_TEXT_CHARS` | `2000` | Characters of OCR text sent (from the start of the document) |
+| `OCR_TEXT_MODE` | `off` | `off`: page images only (recommended). `hint`: images plus Paperless' OCR text as a reading aid. `only`: OCR text, no images |
+| `OCR_TEXT_CHARS` | `2000` | Characters of OCR text sent in `hint`/`only` mode (from the start of the document) |
 | `MAX_PAGES` | `3` | Pages rendered as images. Every page is one vision encoder pass |
 | `IMAGE_MAX_SIZE` | `1024` | Longest side in pixels |
 | `IMAGE_QUALITY` | `85` | JPEG quality |
@@ -126,22 +126,24 @@ Per document the model pays for three things: loading itself into RAM, reading t
 the most expensive part), and writing the answer. The defaults already remove the biggest waste (thinking
 tokens, unbounded output, prose around the JSON). Beyond that, in order of effect:
 
-1. **Text-only mode.** `OCR_TEXT_MODE=only` sends no images at all. Paperless has already OCRed the
-   document, and for letters, invoices and notices the first 2000 characters carry everything the
-   classifier needs. Any model works, including small text models such as `qwen3:4b` or `gemma3:4b`.
-   Expect roughly a 5 to 10 times speed-up over three page images on CPU.
-2. **Fewer pages.** With `OCR_TEXT_MODE=hint`, `MAX_PAGES=1` keeps the letterhead and logo for the model
-   while the OCR text covers the rest.
-3. **Smaller images.** `IMAGE_MAX_SIZE=768` is still enough for layout and logos when the OCR text is
-   present.
-4. **Free RAM between batches.** `OLLAMA_UNLOAD_WHEN_IDLE=true` when Paperless and Ollama share the
+1. **Fewer pages.** `MAX_PAGES=1` or `2`. Every page is a full vision encoder pass, and the first page carries
+   the letterhead, subject line and most of the structure.
+2. **Smaller images.** `IMAGE_MAX_SIZE=768` keeps layout and logos readable for most letters and invoices.
+3. **Free RAM between batches.** `OLLAMA_UNLOAD_WHEN_IDLE=true` when Paperless and Ollama share the
    machine. Reloading costs a few seconds per batch.
-5. **Threads.** Leave `OLLAMA_THREADS=0`, or set it to the number of physical cores.
-6. **Context.** Keep `OLLAMA_NUM_CTX` at 4096 unless the log says the prompt nearly fills it. The KV cache
+4. **Threads.** Leave `OLLAMA_THREADS=0`, or set it to the number of physical cores.
+5. **Context.** Keep `OLLAMA_NUM_CTX` at 4096 unless the log says the prompt nearly fills it. The KV cache
    grows with the context window.
-7. **On the Ollama host**, `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_LOADED_MODELS=1` avoid a second copy
+6. **On the Ollama host**, `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_LOADED_MODELS=1` avoid a second copy
    of the model in RAM. `OLLAMA_FLASH_ATTENTION=1` with `OLLAMA_KV_CACHE_TYPE=q8_0` roughly halves the
    KV cache on recent Ollama versions.
+
+**About Paperless' OCR text.** Using it instead of images was tested during development and found to be
+worse: the flat text loses the layout, and the layout is what tells the model that the address top left is
+the sender, that the table in the middle lists clients, and that the numbers in the footer are bank details.
+That is why `OCR_TEXT_MODE` defaults to `off`. `hint` adds the text as a reading aid next to the images
+(the prompt tells the model the images are authoritative). `only` exists for hardware that cannot run a
+vision model at all; expect lower accuracy on sender and subject.
 
 The log line `Ollama timing: load … | prompt … | output …` after each document shows where the time goes.
 
@@ -199,6 +201,8 @@ journalctl -u paperless-classifier -f
   `OCR_TEXT_CHARS` or the `PROMPT_*_LIMIT` values.
 - **Too slow**: see the tuning section. The `Ollama timing` log line tells you whether loading,
   prompt processing (images) or generation dominates.
+- **Wrong sender or subject after enabling `OCR_TEXT_MODE`**: set it back to `off`. The images are the
+  better source.
 - **Model not found**: `ollama list`, then `ollama pull <model>`.
 - **Nothing is picked up**: `POLL_INTERVAL > 0` or a webhook configured, token valid, Ollama reachable.
 

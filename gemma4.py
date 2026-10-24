@@ -10,10 +10,13 @@ Config is passed in from classifier_api_v2.py - no direct .env reading.
 
 Design notes for low-powered / low-RAM hosts
 --------------------------------------------
-* Paperless already ran OCR. The OCR text is injected into the prompt
-  (OCR_TEXT_MODE=hint) or used instead of images (OCR_TEXT_MODE=only). Text
-  tokens are far cheaper than vision encoder passes and the model can read
-  small print that a downscaled page image loses.
+* Page images are the primary input. The model needs the layout (letterhead
+  top left, client table in the middle, bank details in the footer) to tell
+  sender from recipient and subject from boilerplate; flat OCR text loses
+  those relationships and was found to hurt results in testing. Paperless'
+  OCR text can be added as a secondary hint (OCR_TEXT_MODE=hint) or used alone
+  (OCR_TEXT_MODE=only) for hardware that cannot run a vision model at all.
+  Both are opt-in, the default is off.
 * Page images are rendered once by pdftoppm directly at the target size and
   quality. No second decode/encode pass through Pillow.
 * Thinking is disabled (OLLAMA_THINK=false), generation is capped
@@ -381,9 +384,17 @@ def _build_prompt(ocr_text: str = "", num_images: int = 0) -> str:
             context_lines.append(
                 f"Die {num_images} Bilder sind die ersten {num_images} Seiten EINES Dokuments, in Reihenfolge."
             )
-    if ocr_text:
+    if ocr_text and num_images > 0:
+        # Images stay the primary source; the text only helps with small print.
         context_lines.append(
-            "OCR-Text des Dokuments (Anfang, kann Erkennungsfehler enthalten):\n"
+            "Zusätzlich der Anfang des OCR-Texts, nur als Lesehilfe für kleine Schrift. "
+            "Maßgeblich sind die Bilder: Layout, Briefkopf, Logo und Position der Angaben "
+            "entscheiden, wer Absender ist und was der Inhalt ist.\n"
+            f"<<<\n{ocr_text}\n>>>"
+        )
+    elif ocr_text:
+        context_lines.append(
+            "OCR-Text des Dokuments (Anfang, kann Erkennungsfehler enthalten; Layout ging verloren):\n"
             f"<<<\n{ocr_text}\n>>>"
         )
 
@@ -889,7 +900,7 @@ def process_document(doc_id: int, apply_learning: bool = True, metadata: Optiona
     if not metadata:
         return {"doc_id": doc_id, "success": False, "reason": "metadata_fetch_failed"}
 
-    ocr_mode = str(_config.get("OCR_TEXT_MODE", "hint")).lower()
+    ocr_mode = str(_config.get("OCR_TEXT_MODE", "off")).lower()
     ocr_text = extract_ocr_excerpt(metadata) if ocr_mode in ("hint", "only") else ""
 
     page_images: List[Tuple[bytes, float]] = []
