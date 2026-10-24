@@ -12,9 +12,9 @@ Features:
 """
 import sqlite3
 import json
-import time
+import re
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List
 from difflib import SequenceMatcher
 import logging
 
@@ -25,7 +25,8 @@ DB_PATH = Path(__file__).parent / "classifier_audit.db"
 # Minimum similarity for fuzzy matching (0.0 - 1.0)
 FUZZY_MATCH_THRESHOLD = 0.80
 
-# Minimum times_used to auto-apply a mapping
+# Mappings used at least this often count as "confident" in get_learning_stats().
+# Note: get_mapping() applies every stored mapping regardless of times_used.
 AUTO_APPLY_MIN_CONFIDENCE = 3
 
 
@@ -176,10 +177,32 @@ def delete_mapping(mapping_id: int) -> bool:
 # FUZZY MATCHING
 # =============================================================================
 
-def fuzzy_match(query: str, candidates: List[str], threshold: float = FUZZY_MATCH_THRESHOLD) -> Optional[str]:
+def _containment_score(a: str, b: str, partial_names: bool) -> float:
+    """Score for 'one string is a whole word (or words) of the other'.
+
+    partial_names=False (tags, document types): the shorter string must also
+    make up nearly all of the longer one, so 'amt' never maps to 'finanzamt' and
+    the generic 'versicherung' is not mapped to 'kfz versicherung'.
+    partial_names=True (correspondents): a short name inside a long official
+    name is fine ('telekom' -> 'Deutsche Telekom', 'amazon' -> 'Amazon EU S.a.r.l.').
+    Returns 0.0 when the rule does not apply."""
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    if len(short) < 4 or not long_:
+        return 0.0
+    if not re.search(r"(?<![\wäöüß])" + re.escape(short) + r"(?![\wäöüß])", long_):
+        return 0.0
+    ratio = len(short) / len(long_)
+    if partial_names:
+        return 0.9
+    return 0.95 if ratio >= 0.8 else 0.0
+
+
+def fuzzy_match(query: str, candidates: List[str], threshold: float = FUZZY_MATCH_THRESHOLD,
+                partial_names: bool = False) -> Optional[str]:
     """
     Find the best fuzzy match for a query string among candidates.
-    Returns None if no match meets the threshold.
+    Returns None if no match meets the threshold, or if two candidates are
+    equally good (ambiguous, e.g. 'stadtwerke' vs 'Stadtwerke Bonn'/'Stadtwerke Köln').
     """
     if not query or not candidates:
         return None
@@ -187,6 +210,7 @@ def fuzzy_match(query: str, candidates: List[str], threshold: float = FUZZY_MATC
     query_lower = query.lower().strip()
     best_match = None
     best_score = 0
+    ties = 0
     
     for candidate in candidates:
         candidate_lower = candidate.lower().strip()
@@ -195,17 +219,24 @@ def fuzzy_match(query: str, candidates: List[str], threshold: float = FUZZY_MATC
         if query_lower == candidate_lower:
             return candidate
         
-        # Substring match (one contains the other)
-        if query_lower in candidate_lower or candidate_lower in query_lower:
-            score = 0.95
-        else:
-            # Sequence matcher for similarity
+        # Whole-word containment, then character similarity for typos and
+        # inflections ("rechnungen" ~ "rechnung")
+        score = _containment_score(query_lower, candidate_lower, partial_names)
+        if not score:
             score = SequenceMatcher(None, query_lower, candidate_lower).ratio()
         
-        if score > best_score and score >= threshold:
+        if score < threshold:
+            continue
+        if score > best_score:
             best_score = score
             best_match = candidate
+            ties = 0
+        elif score == best_score:
+            ties += 1
     
+    if best_match and ties:
+        logger.debug(f"Fuzzy match for '{query}' ambiguous ({ties + 1} candidates at {best_score:.0%}), keeping original")
+        return None
     if best_match:
         logger.debug(f"Fuzzy match: '{query}' → '{best_match}' ({best_score:.0%})")
     
@@ -311,6 +342,18 @@ def delete_example(example_id: int) -> bool:
 # NORMALIZATION PIPELINE
 # =============================================================================
 
+def _tag_repeats(tag_lower: str, reference_lower: str) -> bool:
+    """True when a tag just repeats the document type or correspondent:
+    same text, an inflection of it ('rechnungen' ~ 'rechnung'), or a whole
+    word of a multi-word name ('telekom' in 'deutsche telekom')."""
+    if not tag_lower or not reference_lower:
+        return False
+    if tag_lower == reference_lower:
+        return True
+    if len(tag_lower) >= 4 and re.search(r"(?<![\wäöüß])" + re.escape(tag_lower) + r"(?![\wäöüß])", reference_lower):
+        return True
+    return SequenceMatcher(None, tag_lower, reference_lower).ratio() >= 0.85
+
 def normalize_result(
     result: Dict,
     existing_tags: List[str] = None,
@@ -367,7 +410,7 @@ def normalize_result(
             normalized['_corr_mapped'] = True
         elif existing_correspondents:
             # Fuzzy match
-            matched = fuzzy_match(correspondent, existing_correspondents, threshold=threshold)
+            matched = fuzzy_match(correspondent, existing_correspondents, threshold=threshold, partial_names=True)
             if matched:
                 normalized['correspondent'] = matched
                 normalized['_corr_fuzzy'] = True
@@ -382,9 +425,11 @@ def normalize_result(
     tags = result.get('tags', [])
     normalized_tags = []
     
-    # Get doc type and correspondent for comparison
-    doc_type_lower = (normalized.get('document_type') or '').lower().strip()
-    correspondent_lower = (normalized.get('correspondent') or '').lower().strip()
+    # Doc type and correspondent (both the normalized and the model's original
+    # spelling) are their own fields in Paperless and must not become tags.
+    type_refs = {(normalized.get('document_type') or '').lower().strip(), (doc_type or '').lower().strip()}
+    corr_refs = {(normalized.get('correspondent') or '').lower().strip(), (correspondent or '').lower().strip()}
+    type_refs.discard(''); corr_refs.discard('')
     
     for tag in tags:
         if not tag or not isinstance(tag, str):
@@ -393,12 +438,11 @@ def normalize_result(
         tag_clean = tag.strip()
         tag_lower = tag_clean.lower()
         
-        # Only skip if tag exactly matches document type or correspondent
-        if tag_lower == doc_type_lower:
-            logger.debug(f"Skipped tag matching doc type: {tag}")
+        if any(_tag_repeats(tag_lower, ref) for ref in type_refs):
+            logger.debug(f"Skipped tag repeating doc type: {tag}")
             continue
-        if tag_lower == correspondent_lower:
-            logger.debug(f"Skipped tag matching correspondent: {tag}")
+        if any(_tag_repeats(tag_lower, ref) for ref in corr_refs):
+            logger.debug(f"Skipped tag repeating correspondent: {tag}")
             continue
         
         # Skip very short tags (likely OCR artifacts like "ki" from "km")

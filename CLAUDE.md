@@ -1,14 +1,22 @@
 # CLAUDE.md — Paperless AI Classifier
 
-This file provides guidance for AI assistants working on this codebase.
+Guidance for AI assistants working on this codebase.
 
 ## Project Overview
 
-**Paperless AI Classifier** is a Python service that automatically classifies documents in [Paperless-ngx](https://docs.paperless-ngx.com/) using a local vision language model (via [Ollama](https://ollama.ai/)). It assigns document types, correspondents, and tags by analyzing document images with the Ministral vision model.
+**Paperless AI Classifier** is a Python service that classifies documents in
+[Paperless-ngx](https://docs.paperless-ngx.com/) with a local [Ollama](https://ollama.ai/) model. It assigns
+document type, correspondent and tags. The target deployment is a home server or Proxmox LXC without a GPU
+and with limited RAM, so every design decision favours fewer tokens and less resident memory. Prompts and
+results are German.
 
-**Architecture summary:**
-- `ministral.py` — Vision AI classification engine (fetches images, calls Ollama, parses results, updates Paperless)
-- `classifier_api.py` — FastAPI web service with async queue, polling loop, SQLite audit log, and embedded web dashboard
+**Deployed files (copied by `install.sh` / `deploy.sh`):**
+- `classifier_api_v2.py` — FastAPI service: asyncio queue worker, polling loop, webhook, SQLite audit log, embedded dashboard
+- `gemma4.py` — classification engine (any Ollama model, not only Gemma): fetch document, build prompt, call Ollama, normalize, update Paperless
+- `learning.py` — fuzzy matching, term mappings, few-shot examples (SQLite tables in the same database)
+
+**Legacy, not deployed by any script:** `ministral.py`, `classifier_api.py`, `test_gemma4.py`, `upgrade_v2.sh`.
+Do not extend them. If a change is needed in both, the v2 files are the source of truth.
 
 ---
 
@@ -16,78 +24,83 @@ This file provides guidance for AI assistants working on this codebase.
 
 ```
 paperless-ai-classifier/
-├── classifier_api.py      # FastAPI server, async queue, dashboard, endpoints
-├── ministral.py           # Ollama vision classification engine
-├── install.sh             # Bash install/deployment script (creates systemd service)
-├── classifier_audit.db    # SQLite audit log (gitignored in prod, present in repo)
-├── README.md              # User-facing documentation
-└── .gitignore             # Ignores .DS_Store
+├── classifier_api_v2.py   # FastAPI server, queue, dashboard, endpoints  (deployed)
+├── gemma4.py              # Classification engine                        (deployed)
+├── learning.py            # Normalization + learning layer               (deployed)
+├── install.sh             # Interactive installer -> /opt/paperless-classifier + systemd unit
+├── deploy.sh              # Copy the three deployed files to /opt and restart
+├── upgrade_v3.sh          # Upgrade with backup; adds missing .env keys (add_env)
+├── pve-install.sh         # Proxmox: creates Ollama LXC + API LXC
+├── classifier_audit.db    # SQLite audit/learning database (runtime artifact, empty copy in repo)
+├── README.md              # User documentation
+└── ministral.py, classifier_api.py, test_gemma4.py, upgrade_v2.sh   # legacy
 ```
 
-No `requirements.txt` exists — dependencies are installed directly by `install.sh`.
-
----
-
-## Tech Stack
-
-| Component | Technology |
-|-----------|-----------|
-| Web framework | FastAPI + Uvicorn (ASGI) |
-| HTTP client | `requests` |
-| Image processing | Pillow (PIL) + `pdftoppm` (poppler-utils) |
-| AI inference | Ollama REST API (local LLM) |
-| Document store | Paperless-ngx REST API |
-| Audit storage | SQLite 3 (built-in `sqlite3`) |
-| Config | `python-dotenv` (.env file) |
-| Deployment | systemd service |
+No `requirements.txt`: dependencies are installed by `install.sh`
+(`fastapi uvicorn python-dotenv pydantic requests pillow`, plus `poppler-utils` for `pdftoppm`).
 
 ---
 
 ## Configuration
 
-The service reads configuration from a `.env` file (or environment variables). The `.env` is created by `install.sh` at `/opt/paperless-classifier/.env` for production deployments, or can be placed in the working directory for local runs.
+`.env` next to the script, or `/opt/paperless-classifier/.env`. `get_config()` in `classifier_api_v2.py` is the
+single parser (`_env_int` / `_env_float` / `_env_bool` helpers). `gemma4.py` receives the dict via `init_config()`
+and never reads the environment itself. **When adding a key:** add it to `get_config()`, to `_ALLOWED_CONFIG_KEYS`,
+to the dashboard config form (`items` array and `keys` list in `saveConfig`), to `install.sh`, `pve-install.sh`
+and the `add_env` block in `upgrade_v3.sh`, and to the README table.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PAPERLESS_URL` | `http://localhost:8000` | Paperless-ngx server URL |
-| `PAPERLESS_TOKEN` | (required) | API token for Paperless authentication |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
-| `OLLAMA_MODEL` | `ministral-3:14b` | Vision model name |
-| `OLLAMA_THREADS` | `10` | CPU threads for Ollama |
-| `MAX_PAGES` | `3` | Max PDF pages to analyze |
-| `AUTO_COMMIT` | `true` | Auto-apply classifications to Paperless |
-| `GENERATE_EXPLANATIONS` | `false` | Generate human-readable explanations |
-| `API_HOST` | `0.0.0.0` | API bind address |
-| `API_PORT` | `8001` | API/dashboard port |
-| `POLL_INTERVAL` | `60` | Polling interval (seconds) for new documents |
+| Group | Keys |
+|-------|------|
+| Connection | `PAPERLESS_URL`, `PAPERLESS_TOKEN`, `OLLAMA_URL`, `OLLAMA_MODEL` (default `gemma4:e4b`), `API_HOST`, `API_PORT`, `POLL_INTERVAL` |
+| Ollama runtime | `OLLAMA_THREADS` (0 = auto), `OLLAMA_TEMPERATURE` / `OLLAMA_TOP_P` / `OLLAMA_TOP_K` (only sent if set), `OLLAMA_NUM_CTX` (4096), `OLLAMA_NUM_PREDICT` (512), `OLLAMA_THINK` (false), `OLLAMA_STRUCTURED_OUTPUT` (true), `OLLAMA_KEEP_ALIVE` (5m), `OLLAMA_UNLOAD_WHEN_IDLE` (false), `OLLAMA_TIMEOUT` (600) |
+| Input | `OCR_TEXT_MODE` (hint / only / off), `OCR_TEXT_CHARS` (2000), `MAX_PAGES` (3), `IMAGE_MAX_SIZE` (1024), `IMAGE_QUALITY` (85), `IMAGE_GRAYSCALE` (false), `PDF_RENDER_TIMEOUT` (120) |
+| Write-back | `AUTO_COMMIT` (true), `OVERWRITE_EXISTING` (false), `TAGS_MODE` (merge / replace), `GENERATE_EXPLANATIONS` (false) |
+| Prompt / learning | `INJECT_EXISTING_TYPES`, `INJECT_EXISTING_CORRESPONDENTS`, `INJECT_EXISTING_TAGS` (all true), `PROMPT_TYPE_LIMIT` (50), `PROMPT_CORRESPONDENT_LIMIT` (60), `PROMPT_TAG_LIMIT` (80), `LEARNING_ENABLED` (true), `FUZZY_MATCH_THRESHOLD` (0.80), `FEW_SHOT_ENABLED` (false) |
 
 ---
 
 ## Application Flow
 
-### Startup (`lifespan` in `classifier_api.py`)
-1. Initialize SQLite audit database (`init_database()`)
-2. Create asyncio `Queue`
-3. Launch `process_queue()` as background task
-4. Launch `poll_for_new_documents()` as background task
+### Startup (`lifespan`)
+1. `init_database()` creates `audit_log`, `term_mappings`, `classification_examples`
+2. Creates the `asyncio.Queue`, starts `process_queue()` and `poll_for_new_documents()`
 
-### Polling Loop (`poll_for_new_documents`)
-- Queries Paperless API every `POLL_INTERVAL` seconds
-- Finds documents with no `document_type` assigned
-- Adds document IDs to asyncio Queue
+### Triggers
+- **Polling**: newest-first pages of `/api/documents/` until an already seen id; everything newer is queued.
+- **Webhook**: `POST /webhook/paperless` (body with `document_id`, `id`, `pk` or `document`) or `/webhook/paperless/{id}`.
+- **API**: `/api/classify`, `/api/classify/batch` (bare JSON list), `/api/reanalyze/{id}` (adds the id to
+  `_force_overwrite_ids`, so the result overwrites an existing type/correspondent).
 
-### Processing Loop (`process_queue`)
-- Dequeues document IDs
-- Calls `ministral.process_document(doc_id, config)`
-- Logs result to `audit_log` table
-- If `AUTO_COMMIT=true`, applies classification to Paperless
+Dedup: `_pending_set` holds an id from enqueue until processing has finished.
 
-### Classification Engine (`ministral.py`)
-1. **Image fetching** (multi-strategy fallback): preview image → PDF-to-JPEG conversion → thumbnail
-2. **Vision analysis**: sends images to Ollama, expects JSON response with `document_type`, `correspondent`, `tags`
-3. **JSON parsing**: primary JSON parse → regex fallback extraction
-4. **Resource management**: `get_or_create_*` helpers for types, correspondents, tags in Paperless
-5. **Apply changes**: `update_document_in_paperless()` PATCH call
+### Worker (`process_queue`)
+1. `setup_model()` imports `gemma4` and passes a fresh config (config changes need a restart only for the poller)
+2. Fetches metadata once (title, OCR `content`, current type/correspondent/tags) and reuses it everywhere
+3. `model.process_document(doc_id, learning_enabled, metadata)` in a thread
+4. `AUTO_COMMIT`: `model.update_document_in_paperless(doc_id, result, metadata, overwrite)`
+5. `log_to_audit(...)` updates the `processing` row to `completed` / `failed`
+6. When the queue is empty: `invalidate_cache()` and, with `OLLAMA_UNLOAD_WHEN_IDLE`, `unload_model()`
+
+### Engine (`gemma4.py`)
+1. `extract_ocr_excerpt(metadata)` — whitespace-collapsed first `OCR_TEXT_CHARS` characters of Paperless' OCR text
+2. `fetch_document_images()` — `pdftoppm -jpeg -scale-to IMAGE_MAX_SIZE -l MAX_PAGES` into a temp dir, no second
+   encode pass; image originals go through Pillow; fallbacks preview → thumbnail. Skipped in `OCR_TEXT_MODE=only`
+   when OCR text exists.
+3. `_build_prompt(ocr_text, num_images)` — context (page count, OCR block, reference lists most-used-first,
+   few-shot) → numbered rules → exact JSON shape as the last line
+4. `analyze_with_vision()` — `POST /api/chat` with `stream=false`, `think`, `format` (JSON schema from
+   `_json_schema()`), `keep_alive`, options `num_ctx` / `num_predict` / sampling / `num_thread`. On HTTP 400 it drops
+   `think` and/or `format`, remembers that in `_server_caps`, and retries once. Logs Ollama's real
+   `prompt_eval_count` / `eval_count` / durations and warns when the prompt nearly fills `num_ctx`.
+5. `_parse_response()` → `_coerce_result()` (types, tag list, confidence in [0, 1], placeholder correspondents → None)
+6. `normalize_result()` from `learning.py` (mappings, fuzzy matching, tag filtering)
+
+### Write-back (`update_document_in_paperless`)
+- `OVERWRITE_EXISTING=false`: type and correspondent are only set when the document has none
+- `TAGS_MODE=merge`: new tag ids are appended to the document's existing tag ids
+- Nothing is PATCHed when nothing changes
+- `_get_or_create_resource()` checks the cache, then `name__iexact`, then POSTs. Always use the `get_or_create_*`
+  helpers instead of POSTing to Paperless resource endpoints directly.
 
 ---
 
@@ -95,163 +108,72 @@ The service reads configuration from a `.env` file (or environment variables). T
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/` or `/dashboard` | Web dashboard (embedded HTML) |
-| GET | `/api/health` | Service health (Paperless + Ollama connectivity) |
-| GET | `/api/queue` | Current queue status |
-| GET | `/api/stats` | Processing statistics |
-| GET | `/api/audit` | Audit log entries |
-| GET | `/api/config` | Current configuration |
-| POST | `/api/config` | Update configuration |
-| POST | `/api/classify` | Queue a single document `{"document_id": N}` |
-| POST | `/api/classify/batch` | Queue multiple documents `{"document_ids": [N,...]}` |
-| DELETE | `/api/queue/clear` | Clear the queue |
-| DELETE | `/api/audit/{entry_id}` | Delete one audit entry |
-| DELETE | `/api/audit/status/{status}` | Delete all entries with a given status |
-| POST | `/api/audit/cleanup` | Mark stale `processing` entries as `abandoned` |
-| POST | `/webhook/paperless[/{doc_id}]` | Webhook triggered by Paperless post-consume script |
+| GET | `/`, `/dashboard` | Dashboard (embedded HTML) |
+| GET | `/api/health` | Paperless + Ollama reachability |
+| GET | `/api/queue` | Processing state and pending ids |
+| GET | `/api/stats` | Audit statistics |
+| GET | `/api/audit?limit=&offset=` | Audit log |
+| GET / POST | `/api/config` | Read all (token redacted) / write one key `{"key","value"}` |
+| POST | `/api/restart` | Exit; systemd restarts |
+| GET | `/api/ollama/models` | Models on the Ollama server |
+| POST | `/api/classify` | `{"document_id": N}` |
+| POST | `/api/classify/batch` | `[N, ...]` |
+| POST | `/api/reanalyze/{id}` | Re-queue with overwrite |
+| DELETE | `/api/queue/clear` | Clear queue |
+| DELETE | `/api/audit/{id}`, `/api/audit/status/{status}` | Delete audit rows |
+| POST | `/api/audit/cleanup` | Mark stale `processing` rows `abandoned` |
+| GET / POST / DELETE | `/api/mappings[/{id}]` | Term mappings |
+| GET / DELETE | `/api/learn/examples` | Few-shot examples |
+| DELETE | `/api/learn/mappings`, `/api/learn/reset` | Clear learning data |
+| POST | `/api/learn/correct` | Apply a correction from the dashboard modal |
+| GET | `/api/paperless/document/{id}` | Current Paperless values with names |
+| GET | `/api/export/debug`, `/api/export/list`, `/api/export/download/{f}` | Debug exports |
+| DELETE | `/api/export/{f}` | Delete export |
+| GET | `/api/logs?lines=&level=` | Log tail |
+| POST | `/webhook/paperless[/{id}]` | Webhook |
+
+No authentication on any endpoint.
 
 ---
 
-## Database Schema
-
-**File:** `classifier_audit.db` (SQLite)
-
-**Table: `audit_log`**
+## Database Schema (`classifier_audit.db`)
 
 ```sql
-CREATE TABLE audit_log (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    document_id       INTEGER NOT NULL,
-    document_title    TEXT,
-    timestamp         TEXT,           -- ISO 8601 format
-    status            TEXT,           -- pending | processing | completed | failed | abandoned
-    document_type     TEXT,
-    correspondent     TEXT,
-    tags              TEXT,           -- JSON array string
-    confidence        REAL,
-    processing_time   REAL,           -- seconds
-    tokens_used       INTEGER,        -- estimated
-    auto_approved     INTEGER,        -- 0/1 boolean
-    error_message     TEXT,
-    explanation       TEXT
-);
-```
-
----
-
-## Key Code Patterns
-
-### `get_or_create_*` Pattern
-Functions like `get_or_create_tag()`, `get_or_create_correspondent()`, and `get_or_create_document_type()` in `ministral.py` search Paperless for an existing resource by name and create it if absent. Always use these rather than directly POSTing to Paperless resource endpoints.
-
-### Configuration Loading
-`classifier_api.py` uses `get_config()` which reads from `os.environ` (populated by dotenv). `ministral.py` has its own `load_env()` that searches `.env` in multiple paths. Both approaches must stay in sync — when adding new config keys, add them to both files.
-
-### JSON Parsing with Fallback
-`analyze_with_vision()` in `ministral.py` first attempts `json.loads()` on the model response, then falls back to regex extraction (`re.search`) for key fields. Maintain this resilience if modifying the parsing logic.
-
-### Async Queue
-The `asyncio.Queue` in `classifier_api.py` holds document IDs (integers). The `process_queue()` task uses `await queue.get()` / `queue.task_done()`. Do not use blocking I/O inside the async queue worker — wrap blocking calls in `asyncio.to_thread()` or use a thread executor if needed.
-
-### Embedded Dashboard
-`DASHBOARD_HTML` in `classifier_api.py` is a large multi-line string (~500+ lines of HTML/CSS/JS). The dashboard auto-refreshes every 5 seconds via `setInterval`. When modifying the dashboard, preserve the existing CSS variable structure and JavaScript fetch calls to the `/api/*` endpoints.
-
----
-
-## Development Workflows
-
-### Running Locally
-```bash
-# Set environment variables (copy and edit)
-cp .env.example .env   # (no .env.example exists; create .env manually)
-
-# Install Python dependencies
-pip3 install fastapi uvicorn python-dotenv pydantic requests pillow
-
-# Install system dependency for PDF conversion
-apt-get install -y poppler-utils   # Ubuntu/Debian
-
-# Run the API server
-python3 classifier_api.py
-
-# Run the classifier CLI (interactive testing)
-python3 ministral.py
-```
-
-### Testing Classification Manually
-`ministral.py` has a `main()` CLI mode (runs when executed directly):
-```bash
-python3 ministral.py
-# Prompts for document ID(s) and whether to generate explanations
-# Shows classification results and metrics
-# Optionally applies changes to Paperless
-```
-
-### Installing as a System Service
-```bash
-sudo ./install.sh
-# Interactive prompts for all configuration values
-# Installs to /opt/paperless-classifier/
-# Creates and starts systemd service: paperless-classifier
-```
-
-### Service Management
-```bash
-sudo systemctl status paperless-classifier
-sudo systemctl restart paperless-classifier
-sudo journalctl -u paperless-classifier -f   # Follow logs
-```
-
-### Useful API Calls for Development
-```bash
-# Health check
-curl http://localhost:8001/api/health
-
-# Manually classify a document
-curl -X POST http://localhost:8001/api/classify -H "Content-Type: application/json" -d '{"document_id": 42}'
-
-# View queue
-curl http://localhost:8001/api/queue
-
-# View audit log
-curl http://localhost:8001/api/audit
+audit_log(id, document_id, document_title, timestamp, status,      -- processing|completed|failed|abandoned
+          document_type, correspondent, tags /*JSON*/, confidence, processing_time,
+          tokens_used /*prompt_eval_count+eval_count*/, auto_approved, error_message, explanation, ai_raw);
+term_mappings(id, term_type /*document_type|correspondent|tag*/, ai_term, approved_term, times_used,
+              created_at, last_used, UNIQUE(term_type, ai_term));
+classification_examples(id, document_id, document_title, document_type, correspondent, tags /*JSON*/,
+                        confidence, user_verified, created_at);
 ```
 
 ---
 
 ## Code Conventions
 
-- **Type hints**: Use `Optional[T]`, `Dict[str, Any]`, `List[T]`, `Tuple[T, ...]` throughout
-- **Logging**: Use `logging.getLogger(__name__)` with `INFO/DEBUG/WARNING/ERROR` levels; avoid `print()` statements
-- **Error handling**: Always use `try/except` with specific exception types; log errors with context before re-raising or returning `None`
-- **Config access**: Access config values via the config dict (e.g., `config["PAPERLESS_URL"]`), not direct `os.environ` calls inside functions
-- **No test framework**: No pytest or unittest is set up; manual testing via CLI or API calls is the current approach
+- Type hints (`Optional`, `Dict`, `List`, `Tuple`); `logging.getLogger(__name__)`; no `print()` in deployed files
+- `try/except` with context in the log message; return `None` / `False` rather than raising across module boundaries
+- Config is read from the config dict (`_config.get(...)`, `_cfg_bool`, `_cfg_int` in `gemma4.py`), never `os.environ` inside functions
+- Blocking `requests` calls from the event loop go through `asyncio.to_thread()`
+- Dashboard: everything rendered via `innerHTML` from model output or document titles goes through `esc()`;
+  attach handlers with `data-*` attributes and `addEventListener`, not hand-built `onclick` strings
+- Prompt and model-facing strings are German; code, comments and logs are English
+- No test framework in the repo. Changes are verified with mocked Paperless/Ollama servers; keep functions
+  pure enough that `_parse_response`, `_coerce_result`, `_build_prompt`, `extract_ocr_excerpt`, `fuzzy_match`
+  and `normalize_result` stay testable without network
 
 ---
 
-## External Dependencies
+## Notes for AI Assistants
 
-| Service | Role | Default URL |
-|---------|------|-------------|
-| Ollama | Local LLM inference | `http://localhost:11434` |
-| Paperless-ngx | Document store and API | `http://localhost:8000` |
-
-Both services must be running and reachable for the classifier to function. The `/api/health` endpoint checks connectivity to both.
-
----
-
-## Important Notes for AI Assistants
-
-1. **No tests exist** — when adding features, consider whether a manual test via `ministral.py` CLI or the API is sufficient, or suggest adding a test framework.
-
-2. **Single-file architecture** — `classifier_api.py` and `ministral.py` are large, self-contained files. Before extracting code to new files, confirm the user wants to change the deployment model (since `install.sh` copies specific files to `/opt/paperless-classifier/`).
-
-3. **install.sh must stay in sync** — if new Python packages are added as imports, they must be added to the `pip3 install` command in `install.sh`.
-
-4. **Embedded HTML** — the `DASHBOARD_HTML` constant in `classifier_api.py` is intentional (single-file deployment). Do not refactor it to external template files without updating `install.sh`.
-
-5. **Blocking calls in async context** — `requests` calls inside `process_queue()` and `poll_for_new_documents()` are currently blocking. This is a known limitation. If extending these functions significantly, consider wrapping in `asyncio.to_thread()`.
-
-6. **Production path** — the service runs from `/opt/paperless-classifier/` in production, but the repo root is `/home/user/paperless-ai-classifier/`. Path handling in `load_env()` accounts for both.
-
-7. **Document type taxonomy** — `ministral.py` contains a large hardcoded list of document types (~200+). Changes to this list affect classification accuracy and should be made deliberately.
+1. **Low-RAM goal.** Anything added to the prompt or to the image pipeline costs CPU time per document.
+   Prefer text over images, bound every list, and keep `num_ctx` small.
+2. **Single-file deployment.** `install.sh`/`deploy.sh` copy exactly three files. New modules mean updating
+   both scripts and `upgrade_v3.sh`.
+3. **Embedded dashboard.** `DASHBOARD_HTML` in `classifier_api_v2.py` is intentional. Keep the CSS variable
+   structure and the 5-second `refreshAll` interval.
+4. **Paperless semantics.** Tag/type/correspondent names are unique case-insensitively; `/download/` returns the
+   archived (OCRed) PDF; the document's OCR text is the `content` field of `/api/documents/{id}/`.
+5. **Ollama semantics.** Prompts longer than `num_ctx` are truncated silently by the server; `think` and `format`
+   may be rejected by old versions (handled); `keep_alive: 0` on `/api/generate` unloads a model.
